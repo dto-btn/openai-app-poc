@@ -1,0 +1,9 @@
+openai 
+azure-identity 
+azure-keyvault-secrets 
+llama-index 
+azure-storage-blob 
+langchain 
+flask 
+python-dotenv
+gunicorn
