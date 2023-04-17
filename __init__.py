@@ -56,6 +56,10 @@ class NewAzureOpenAI(AzureOpenAI):
         #params['stop'] = self.stop
         return params
 
+@app.route("/health", methods=["GET"])
+def health(): 
+    return jsonify({"msg":"Healthy"})
+
 @app.route("/prompt", methods=["POST"])
 def prompt():
     prompt = ""

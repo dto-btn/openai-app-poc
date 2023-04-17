@@ -11,7 +11,7 @@ pip install -r requirements.txt
 
 Might need to run `Ctrl+Shift+P` in VSCode, type `Python: Create environment...` and follow instructions if needed.
 
-To run the application simply do `flask run`
+To run the application simply do `flask --app __init__.py run`
 
 ### build image and run it
 
