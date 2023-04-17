@@ -108,7 +108,10 @@ def get_index(temperature: float, service_context: ServiceContext) -> "GPTSimple
     # check if index file is present on fs ortherwise build it ...
     if os.path.exists(index_location):
         return GPTSimpleVectorIndex.load_from_disk(save_path=index_location, service_context=service_context)
-    return build_index(temperature, service_context)
+    else:
+        index = build_index(temperature, service_context)
+        index.save_to_disk(index_location)
+        return index
         
 def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimpleVectorIndex":
     logging.info("Creating index...")

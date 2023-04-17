@@ -1,5 +1,7 @@
 FROM python:3.9
 
+ENV TZ="Canada/Eastern"
+
 WORKDIR /app
 
 ADD . /app

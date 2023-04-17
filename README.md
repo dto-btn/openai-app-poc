@@ -17,6 +17,7 @@ To run the application simply do `flask run`
 
 ```bash
 docker build -t scdcciodtoopenaipoccontainerregistry.azurecr.io/app .
+docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app
 # then you can run it via 
 docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/app
 ```
