@@ -6,7 +6,7 @@ python flask app that uses an index and calls Azure OpenAI
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt --upgrade
 ```
 
 Might need to run `Ctrl+Shift+P` in VSCode, type `Python: Create environment...` and follow instructions if needed.
@@ -21,6 +21,17 @@ docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app
 # then you can run it via 
 docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/app
 ```
+
+### troubleshooting
+
+If you ever get an error like this one while building/loading the vector index: 
+
+```log
+2023-04-18T13:22:20.948654585Z     type = docstore_dict[TYPE_KEY]
+2023-04-18T13:22:20.948658985Z KeyError: '__type__'
+```
+
+It is mostlikely because the index wasn't build with the same package version it is being loaded. Simply rebuild the index with the most up to date version of the packages and re-load it.
 
 ## documentation
 

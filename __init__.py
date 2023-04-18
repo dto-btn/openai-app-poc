@@ -42,8 +42,6 @@ os.environ["OPENAI_API_BASE"]   = azure_openai_uri
 os.environ["OPENAI_API_KEY"]    = client.get_secret("AzureOpenAIKey").value
 os.environ["OPENAI_API_VERSION"] = '2022-12-01' # this may change in the future
 
-SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-
 class NewAzureOpenAI(AzureOpenAI):
     stop: List[str] = None
     @property
@@ -116,7 +114,13 @@ def get_index(temperature: float, service_context: ServiceContext) -> "GPTSimple
         index = build_index(temperature, service_context)
         index.save_to_disk(index_location)
         return index
-        
+
+"""
+
+TODO: Move the two functions bellow to their own application service
+
+
+"""       
 def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimpleVectorIndex":
     logging.info("Creating index...")
     container_client = blob_service_client.get_container_client(container="unstructureddocs")
@@ -125,6 +129,7 @@ def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimp
     for blob in container_client.list_blobs():
         download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
     
+    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
     documents = SimpleDirectoryReader(input_dir='/tmp/sscplus').load_data()
     #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
 
