@@ -8,7 +8,7 @@ from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.llms import AzureOpenAI
+from langchain.chat_models import AzureChatOpenAI
 from llama_index import (GPTSimpleVectorIndex, LangchainEmbedding,
                          LLMPredictor, PromptHelper, QuestionAnswerPrompt, ServiceContext, download_loader)
 
@@ -35,24 +35,12 @@ blob_service_client = BlobServiceClient.from_connection_string(client.get_secret
 openai.api_type     = 'azure'
 openai.api_base     = azure_openai_uri
 openai.api_key      = client.get_secret("AzureOpenAIKey").value
-openai.api_version  = '2022-12-01' # this may change in the future
+openai.api_version  = '2023-03-15-preview' # this may change in the future
 
 os.environ["OPENAI_API_TYPE"]   = "azure"
 os.environ["OPENAI_API_BASE"]   = azure_openai_uri
 os.environ["OPENAI_API_KEY"]    = client.get_secret("AzureOpenAIKey").value
-os.environ["OPENAI_API_VERSION"] = '2022-12-01' # this may change in the future
-
-class NewAzureOpenAI(AzureOpenAI):
-    stop: List[str] = None
-    @property
-    def _invocation_params(self):
-        params = super()._invocation_params
-        # fix InvalidRequestError: logprobs, best_of and echo parameters are not available on gpt-35-turbo model.
-        params.pop('logprobs', None)
-        params.pop('best_of', None)
-        params.pop('echo', None)
-        #params['stop'] = self.stop
-        return params
+os.environ["OPENAI_API_VERSION"] = '2023-03-15-preview' # this may change in the future
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -86,7 +74,7 @@ def prompt():
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
     
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = NewAzureOpenAI(deployment_name=deployment_name, model_name=deployment_name, temperature=temperature)
+    llm = AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature, openai_api_version="2023-03-15-preview")
     print(llm)
     llm_predictor = LLMPredictor(llm=llm)
     #current limitation with Azure OpenAI, has to be chunk size of 1
@@ -94,12 +82,12 @@ def prompt():
     service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm)
 
     index = get_index(temperature, service_context)
-    answer = index.query(prompt, text_qa_template=prompt_template)
+    answer = index.query(prompt, mode="embedding")
 
     #print(answer.response)
 
     if answer:
-        return jsonify({'prompt':prompt,'answer':answer.response,'nodes_score':[node.score for node in answer.source_nodes]})
+        return jsonify({'prompt':prompt,'answer':str(answer),'nodes_score':[node.score for node in answer.source_nodes]})
     else:
         # ideally return json..
         return jsonify({"msg":
