@@ -11,6 +11,7 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.chat_models import AzureChatOpenAI
 from llama_index import (GPTSimpleVectorIndex, LangchainEmbedding,
                          LLMPredictor, PromptHelper, QuestionAnswerPrompt, ServiceContext, download_loader)
+from llama_index.logger import LlamaLogger
 
 from dotenv import load_dotenv
 
@@ -37,33 +38,31 @@ openai.api_base     = azure_openai_uri
 openai.api_key      = client.get_secret("AzureOpenAIKey").value
 openai.api_version  = '2023-03-15-preview' # this may change in the future
 
-os.environ["OPENAI_API_TYPE"]   = "azure"
-os.environ["OPENAI_API_BASE"]   = azure_openai_uri
-os.environ["OPENAI_API_KEY"]    = client.get_secret("AzureOpenAIKey").value
-os.environ["OPENAI_API_VERSION"] = '2023-03-15-preview' # this may change in the future
-
 @app.route("/health", methods=["GET"])
 def health(): 
     return jsonify({"msg":"Healthy"})
 
-@app.route("/prompt", methods=["POST"])
-def prompt():
-    prompt = ""
-    temperature = 0.7
+@app.route("/query", methods=["POST"])
+def query():
+    query = ""
+    k = 3 # default
+    temperature = 0.7 # default
     body = request.json
-    if "prompt" in body:
-        prompt = request.json["prompt"]
+    if "query" in body:
+        query = request.json["query"]
     if "temp" in body:
         temperature = float(request.json["temp"])
+    if "k" in body:
+        k = int(request.json["k"])
 
     # Define prompt helper
-    max_input_size = 1024
-    num_output = 256
+    max_input_size = 4096
+    num_output = 256 #hard limit
     chunk_size_limit = 1000 # token window size per document
     max_chunk_overlap = 20 # overlap for each token fragment
 
     QA_PROMPT_TMPL = (
-        "We have provided context information below. \n"
+        "You are a Shared Services Canada (SSC) assistant. We have provided context information below. \n"
         "---------------------\n"
         "{context_str}"
         "\n---------------------\n"
@@ -71,23 +70,26 @@ def prompt():
     )
     prompt_template = QuestionAnswerPrompt(QA_PROMPT_TMPL)
 
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
-    
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature, openai_api_version="2023-03-15-preview")
     print(llm)
     llm_predictor = LLMPredictor(llm=llm)
-    #current limitation with Azure OpenAI, has to be chunk size of 1
-    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1))
-    service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm)
+
+    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+
+    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1000))
+
+    llama_logger = LlamaLogger()
+
+    service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, llama_logger=llama_logger)
 
     index = get_index(temperature, service_context)
-    answer = index.query(prompt, mode="embedding")
+    response = index.query(query, mode="embedding", text_qa_template=prompt_template, similarity_top_k=k, response_mode="compact")
+    #return StreamingResponse(index.query(query, streaming=True).response_gen)
+    print(response.get_formatted_sources())
 
-    #print(answer.response)
-
-    if answer:
-        return jsonify({'prompt':prompt,'answer':str(answer),'nodes_score':[node.score for node in answer.source_nodes]})
+    if response:
+        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
     else:
         # ideally return json..
         return jsonify({"msg":
