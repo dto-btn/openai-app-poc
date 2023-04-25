@@ -33,10 +33,10 @@ client      = SecretClient(vault_url=kv_uri, credential=credential)
 
 blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
 
-openai.api_type     = 'azure'
-openai.api_base     = azure_openai_uri
-openai.api_key      = client.get_secret("AzureOpenAIKey").value
-openai.api_version  = '2023-03-15-preview' # this may change in the future
+openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
+openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
+openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
+openai.api_version = os.environ["OPENAI_API_VERSION"] = '2023-03-15-preview' # this may change in the future
 
 @app.route("/health", methods=["GET"])
 def health(): 

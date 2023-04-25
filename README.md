@@ -1,5 +1,5 @@
 # openai-app-poc
-python flask app that uses an index and calls Azure OpenAI
+python flask app that uses llama index and langchain to build a vector index and query an LLM (Azure OpenAI).
 
 ## how-to
 
@@ -12,6 +12,20 @@ pip install -r requirements.txt --upgrade
 Might need to run `Ctrl+Shift+P` in VSCode, type `Python: Create environment...` and follow instructions if needed.
 
 To run the application simply do `flask --debug --app __init__.py run`
+
+### sending a query
+
+Only the `body.query` parameter is mandatory, other fields are optionals and have reasonable defaults.
+
+```bash
+curl --location 'http://127.0.0.1:5000/query' \
+--header 'Content-Type: application/json' \
+--data '{
+    "query": "What is the ITSM training mailbox email address? I want the email address with the ampersand in it.",
+    "temp": 0.7,
+    "k": 3
+}'
+```
 
 ### build image and run it
 
