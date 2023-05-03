@@ -1,19 +1,19 @@
 import logging
 import os
 from typing import List
-from flask import Flask, request, jsonify
 
 import openai
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.chat_models import AzureChatOpenAI
-from llama_index import (GPTSimpleVectorIndex, LangchainEmbedding,
-                         LLMPredictor, PromptHelper, QuestionAnswerPrompt, ServiceContext, download_loader)
-from llama_index.logger import LlamaLogger
-
 from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from langchain.chat_models import AzureChatOpenAI
+from langchain.embeddings import OpenAIEmbeddings
+from llama_index import (GPTSimpleVectorIndex, LangchainEmbedding,
+                         LLMPredictor, PromptHelper, QuestionAnswerPrompt,
+                         ServiceContext, download_loader)
+from llama_index.logger import LlamaLogger
 
 load_dotenv()
 
@@ -48,12 +48,19 @@ def query():
     k = 3 # default
     temperature = 0.7 # default
     body = request.json
+    debug = False
     if "query" in body:
         query = request.json["query"]
+    else:
+         return jsonify({"msg":
+             "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response."}
+        )
     if "temp" in body:
         temperature = float(request.json["temp"])
     if "k" in body:
         k = int(request.json["k"])
+    if "debug" in body:
+        debug = bool(request.json["debug"])
 
     # Define prompt helper
     max_input_size = 4096
@@ -77,7 +84,8 @@ def query():
 
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
 
-    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1000))
+    # limit is chunk size 1 atm
+    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1))
 
     llama_logger = LlamaLogger()
 
@@ -86,16 +94,14 @@ def query():
     index = get_index(temperature, service_context)
     response = index.query(query, mode="embedding", text_qa_template=prompt_template, similarity_top_k=k, response_mode="compact")
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
-    print(response.get_formatted_sources())
+    #print(response.get_formatted_sources())
+    #print(service_context.llama_logger.get_logs())
 
-    if response:
-        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
+    if debug:
+        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes], 'logs': service_context.llama_logger.get_logs()})
     else:
-        # ideally return json..
-        return jsonify({"msg":
-             "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response."}
-        )
-
+        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
+       
 def get_index(temperature: float, service_context: ServiceContext) -> "GPTSimpleVectorIndex":
     # check if index file is present on fs ortherwise build it ...
     if os.path.exists(index_location):
@@ -107,7 +113,7 @@ def get_index(temperature: float, service_context: ServiceContext) -> "GPTSimple
 
 """
 
-TODO: Move the two functions bellow to their own application service
+TODO: Move the two functions below to their own application service
 
 
 """       
@@ -120,7 +126,7 @@ def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimp
         download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
     
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir='/tmp/sscplus').load_data()
+    documents = SimpleDirectoryReader(input_dir='/tmp/sscplus', recursive=True).load_data()
     #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
 
     return GPTSimpleVectorIndex.from_documents(documents, service_context=service_context)
