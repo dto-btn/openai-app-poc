@@ -175,7 +175,7 @@ SEE:
 """
 def _get_prompt_template(lang: str):
 
-    if lang is "fr":
+    if lang == "fr":
         QA_PROMPT_TMPL = (
             "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous. \n"
             "---------------------\n"
@@ -196,7 +196,7 @@ def _get_prompt_template(lang: str):
 
 def _get_refined_prompt(lang: str):
     # Refine Prompt
-    if lang is "fr":
+    if lang == "fr":
         CHAT_REFINE_PROMPT_TMPL_MSGS = [
             HumanMessagePromptTemplate.from_template("{query_str}"),
             AIMessagePromptTemplate.from_template("{existing_answer}"),
