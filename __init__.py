@@ -14,6 +14,13 @@ from llama_index import (GPTSimpleVectorIndex, LangchainEmbedding,
                          LLMPredictor, PromptHelper, QuestionAnswerPrompt,
                          ServiceContext, download_loader)
 from llama_index.logger import LlamaLogger
+from langchain.prompts.chat import (
+    AIMessagePromptTemplate,
+    ChatPromptTemplate,
+    HumanMessagePromptTemplate,
+)
+
+from llama_index.prompts.prompts import RefinePrompt
 
 load_dotenv()
 
@@ -44,55 +51,42 @@ def health():
 
 @app.route("/query", methods=["POST"])
 def query():
+
     query = ""
     k = 3 # default
     temperature = 0.7 # default
     body = request.json
     debug = False
+    lang = "en"
+
     if "query" in body:
         query = request.json["query"]
     else:
-         return jsonify({"msg":
-             "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response."}
-        )
+         return jsonify({"msg":"You must ask a question!"})
+    
     if "temp" in body:
         temperature = float(request.json["temp"])
+
     if "k" in body:
         k = int(request.json["k"])
+
     if "debug" in body:
         debug = bool(request.json["debug"])
 
-    # Define prompt helper
-    max_input_size = 4096
-    num_output = 256 #hard limit
-    chunk_size_limit = 1000 # token window size per document
-    max_chunk_overlap = 20 # overlap for each token fragment
+    if "lang" in body:
+        if str(request.json["lang"]) == "fr":
+            lang = "fr"
 
-    QA_PROMPT_TMPL = (
-        "You are a Shared Services Canada (SSC) assistant. We have provided context information below. \n"
-        "---------------------\n"
-        "{context_str}"
-        "\n---------------------\n"
-        "Given this information, please answer the question: {query_str}\n"
-    )
-    prompt_template = QuestionAnswerPrompt(QA_PROMPT_TMPL)
+    service_context = _get_service_context(temperature)
 
-    # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature, openai_api_version="2023-03-15-preview")
-    print(llm)
-    llm_predictor = LLMPredictor(llm=llm)
-
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
-
-    # limit is chunk size 1 atm
-    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1))
-
-    llama_logger = LlamaLogger()
-
-    service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, llama_logger=llama_logger)
-
+    # Query ChatGPT / embeddings deployment(s)
     index = get_index(temperature, service_context)
-    response = index.query(query, mode="embedding", text_qa_template=prompt_template, similarity_top_k=k, response_mode="compact")
+    response = index.query(query, mode="embedding", 
+                           text_qa_template=_get_prompt_template(lang), 
+                           similarity_top_k=k, 
+                           response_mode="compact", 
+                           refine_template=_get_refined_prompt(lang))
+    
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
     #print(response.get_formatted_sources())
     #print(service_context.llama_logger.get_logs())
@@ -107,7 +101,7 @@ def get_index(temperature: float, service_context: ServiceContext) -> "GPTSimple
     if os.path.exists(index_location):
         return GPTSimpleVectorIndex.load_from_disk(save_path=index_location, service_context=service_context)
     else:
-        index = build_index(temperature, service_context)
+        index = _build_index(temperature, service_context)
         index.save_to_disk(index_location)
         return index
 
@@ -117,13 +111,13 @@ TODO: Move the two functions below to their own application service
 
 
 """       
-def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimpleVectorIndex":
+def _build_index(temperature: float, service_context: ServiceContext) -> "GPTSimpleVectorIndex":
     logging.info("Creating index...")
     container_client = blob_service_client.get_container_client(container="unstructureddocs")
 
     #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
     for blob in container_client.list_blobs():
-        download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
+        _download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
     
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
     documents = SimpleDirectoryReader(input_dir='/tmp/sscplus', recursive=True).load_data()
@@ -131,7 +125,7 @@ def build_index(temperature: float, service_context: ServiceContext) -> "GPTSimp
 
     return GPTSimpleVectorIndex.from_documents(documents, service_context=service_context)
     
-def download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
+def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
     basepath = "/tmp/"
     
     blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
@@ -144,3 +138,96 @@ def download_blob_to_file(blob_service_client: BlobServiceClient, container_name
     with open(file=basepath + blob_name, mode="wb") as sample_blob:
         download_stream = blob_client.download_blob()
         sample_blob.write(download_stream.readall())
+
+def _get_service_context(temperature: str) -> "ServiceContext":
+    # Define prompt helper
+    max_input_size = 4096
+    num_output = 256 #hard limit
+    chunk_size_limit = 1000 # token window size per document
+    max_chunk_overlap = 20 # overlap for each token fragment
+
+    
+
+    # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
+    llm = AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature, openai_api_version="2023-03-15-preview")
+    print(llm)
+    llm_predictor = LLMPredictor(llm=llm)
+
+    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+
+    # limit is chunk size 1 atm
+    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1))
+
+    llama_logger = LlamaLogger()
+
+    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, llama_logger=llama_logger)
+
+"""
+
+NOTE: for refined prompt templates for bilingual 
+we also have to modify the refined prompt templates, 
+which generally will change the original french answer to an english one
+
+SEE: 
+    * https://github.com/jerryjliu/llama_index/blob/main/llama_index/prompts/chat_prompts.py and 
+    * https://github.com/jerryjliu/llama_index/issues/1335
+
+"""
+def _get_prompt_template(lang: str):
+
+    if lang is "fr":
+        QA_PROMPT_TMPL = (
+            "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous. \n"
+            "---------------------\n"
+            "{context_str}"
+            "\n---------------------\n"
+            "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
+        )
+    else:
+        QA_PROMPT_TMPL = (
+            "You are a Shared Services Canada (SSC) assistant. We have provided context information below. \n"
+            "---------------------\n"
+            "{context_str}"
+            "\n---------------------\n"
+            "Given this information, please answer the question: {query_str}\n"
+    )
+
+    return QuestionAnswerPrompt(QA_PROMPT_TMPL)
+
+def _get_refined_prompt(lang: str):
+    # Refine Prompt
+    if lang is "fr":
+        CHAT_REFINE_PROMPT_TMPL_MSGS = [
+            HumanMessagePromptTemplate.from_template("{query_str}"),
+            AIMessagePromptTemplate.from_template("{existing_answer}"),
+            HumanMessagePromptTemplate.from_template(
+                "J'ai plus de contexte ci-dessous qui peut être utilisé"
+                "(uniquement si nécessaire) pour mettre à jour votre réponse précédente.\n"
+                "------------\n"
+                "{context_msg}\n"
+                "------------\n"
+                "Compte tenu du nouveau contexte, mettre à jour la réponse précédente pour mieux"
+                "répondez à ma question précédente."
+                "Si la réponse précédente reste la même, répétez-la textuellement."
+                "Ne référencez jamais directement le nouveau contexte ou ma requête précédente.",
+            ),
+        ]
+    else:
+        CHAT_REFINE_PROMPT_TMPL_MSGS = [
+            HumanMessagePromptTemplate.from_template("{query_str}"),
+            AIMessagePromptTemplate.from_template("{existing_answer}"),
+            HumanMessagePromptTemplate.from_template(
+                "I have more context below which can be used "
+                "(only if needed) to update your previous answer.\n"
+                "------------\n"
+                "{context_msg}\n"
+                "------------\n"
+                "Given the new context, update the previous answer to better "
+                "answer my previous query."
+                "If the previous answer remains the same, repeat it verbatim. "
+                "Never reference the new context or my previous query directly.",
+            ),
+        ]
+
+    CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
+    return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
