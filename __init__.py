@@ -24,6 +24,8 @@ from langchain.prompts.chat import (
 
 from llama_index.prompts.prompts import RefinePrompt
 
+from werkzeug.exceptions import HTTPException, InternalServerError
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -57,7 +59,7 @@ def query():
 
     query = ""
     k = 3 # default
-    temperature = 0.7 # default
+    #temperature = 0.7 # default
     body = request.json
     debug = False
     lang = "en"
@@ -83,11 +85,11 @@ def query():
     service_context = _get_service_context(temperature)
 
     # Query ChatGPT / embeddings deployment(s)
-    index = get_index(service_context)
+    index = get_index()
     query_engine = index.as_query_engine(mode="embedding", 
                                         text_qa_template=_get_prompt_template(lang), 
                                         similarity_top_k=k, 
-                                        response_mode="compact", 
+                                        response_mode="tree_summarize", 
                                         refine_template=_get_refined_prompt(lang), service_context=service_context)
     response = query_engine.query(query)
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
@@ -99,50 +101,20 @@ def query():
     else:
         return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
        
-def get_index(service_context: ServiceContext) -> "GPTVectorStoreIndex":
+def get_index() -> "GPTVectorStoreIndex":
     # check if index file is present on fs ortherwise build it ...
-    if os.path.exists(DEFAULT_PERSIST_DIR):
+    try:
         storage_context = StorageContext.from_defaults(persist_dir=DEFAULT_PERSIST_DIR)
         return load_index_from_storage(storage_context)
-    else:
-        index = _build_index(service_context)
-        index.storage_context.persist()
-        return index
-
+    except HTTPException:
+        return InternalServerError()
 """
 
 TODO: Move the two functions below to their own application service
 
 
-"""       
-def _build_index(service_context: ServiceContext) -> "GPTVectorStoreIndex":
-    logging.info("Creating index...")
-    container_client = blob_service_client.get_container_client(container="unstructureddocs")
-
-    #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
-    for blob in container_client.list_blobs():
-        _download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
-    
-    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir='/tmp/sscplus2', recursive=True).load_data()
-    #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
-
-    return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    
-def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
-
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-
-    # azure function app only allows write to /tmp on the file system
-    isExist = os.path.exists(_basepath + os.path.dirname(blob_name))
-    if not isExist:
-        os.makedirs(_basepath + os.path.dirname(blob_name))
-
-    with open(file=_basepath + blob_name, mode="wb") as sample_blob:
-        download_stream = blob_client.download_blob()
-        sample_blob.write(download_stream.readall())
-
-def _get_service_context(temperature: str) -> "ServiceContext":
+""" 
+def _get_service_context(temperature: str = 0.7) -> "ServiceContext":
     # Define prompt helper
     max_input_size = 4096
     num_output = 256 #hard limit
@@ -235,3 +207,36 @@ def _get_refined_prompt(lang: str):
 
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
+
+@app.route("/build", methods=["GET"])
+def build_index():
+    logging.info("Creating index...")
+    container_client = blob_service_client.get_container_client(container="unstructureddocs")
+
+    #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
+    for blob in container_client.list_blobs():
+        _download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
+    
+    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+    documents = SimpleDirectoryReader(input_dir='/tmp/sscplus2', recursive=True).load_data()
+    #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
+
+    service_context = _get_service_context()
+    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    index.storage_context.persist()
+
+    #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    return jsonify({'index': "index loaded successfully"})
+    
+def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
+
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+    # azure function app only allows write to /tmp on the file system
+    isExist = os.path.exists(_basepath + os.path.dirname(blob_name))
+    if not isExist:
+        os.makedirs(_basepath + os.path.dirname(blob_name))
+
+    with open(file=_basepath + blob_name, mode="wb") as sample_blob:
+        download_stream = blob_client.download_blob()
+        sample_blob.write(download_stream.readall())
