@@ -139,4 +139,4 @@ __azurite_db*__.json
 
 storage/
 storage.tar.gz
-storage.zip
+container/

@@ -34,7 +34,7 @@ app = Flask(__name__)
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
 deployment_name         = os.environ["OPENAI_DEPLOYMENT_NAME"]
-_basepath              = "/tmp/"
+_basepath              = "./container/"
 openai_api_version = "2023-03-15-preview" # this may change in the future
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
@@ -208,17 +208,18 @@ def _get_refined_prompt(lang: str):
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
 
-@app.route("/build", methods=["GET"])
+@app.route("/build", methods=["POST"])
 def build_index():
     logging.info("Creating index...")
-    container_client = blob_service_client.get_container_client(container="unstructureddocs")
+    container_name = "itsm"
+    container_client = blob_service_client.get_container_client(container=container_name)
 
     #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
     for blob in container_client.list_blobs():
-        _download_blob_to_file(blob_service_client, container_name="unstructureddocs", blob_name=blob.name)
+        _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
     
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir='/tmp/sscplus2', recursive=True).load_data()
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True).load_data()
     #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
 
     service_context = _get_service_context()
