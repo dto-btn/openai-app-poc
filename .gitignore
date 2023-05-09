@@ -138,7 +138,5 @@ __azurite_db*__.json
 .python_packages
 
 storage/
-storage2/
+storage.tar.gz
 container/
-**/*.zip
-**/*.tar.gz

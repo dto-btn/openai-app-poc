@@ -40,8 +40,8 @@ app = Flask(__name__)
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
 deployment_name         = os.environ["OPENAI_DEPLOYMENT_NAME"]
-_basepath               = "./container/"
-openai_api_version      = "2023-03-15-preview" # this may change in the future
+_basepath              = "./container/"
+openai_api_version = "2023-03-15-preview" # this may change in the future
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
 azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
@@ -146,7 +146,7 @@ def query():
         r['logs'] = service_context.llama_logger.get_logs()
 
     return jsonify(r)
-    
+"""
 @app.route("/build", methods=["POST"])
 def build_index():
     if "name" not in request.json:
@@ -174,7 +174,7 @@ def build_index():
 
     #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
     return jsonify({'msg': "index loaded successfully"})
-
+"""
 """
 Download files from an Azure Blob storage to the local FS
 """ 
@@ -306,13 +306,19 @@ def _get_refined_prompt(lang: str):
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
 
-"""
-Metadata building for the index nodes, stored in extra_info at response time.
+@app.route("/build", methods=["POST"])
+def build_index():
+    logging.info("Creating index...")
+    container_name = "itsm"
+    container_client = blob_service_client.get_container_client(container=container_name)
 
-"""
-def _filename_fn(filename: str) -> dict:
-    # gather metadata about the file or url ... and add it as a dict
-    lastmod = time.ctime(os.path.getmtime(filename))
+    #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
+    for blob in container_client.list_blobs():
+        _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
+    
+    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True).load_data()
+    #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
 
     fn = filename
     if fn.startswith("container/"):
