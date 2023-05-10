@@ -24,8 +24,6 @@ from langchain.prompts.chat import (
 
 from llama_index.prompts.prompts import RefinePrompt
 
-from werkzeug.exceptions import HTTPException, InternalServerError
-
 load_dotenv()
 
 app = Flask(__name__)
@@ -34,8 +32,8 @@ app = Flask(__name__)
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
 deployment_name         = os.environ["OPENAI_DEPLOYMENT_NAME"]
-_basepath              = "./container/"
-openai_api_version = "2023-03-15-preview" # this may change in the future
+_basepath               = "./container/"
+openai_api_version      = "2023-03-15-preview" # this may change in the future
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
 azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
@@ -59,7 +57,7 @@ def query():
 
     query = ""
     k = 3 # default
-    #temperature = 0.7 # default
+    temperature = 0.7 # default
     body = request.json
     debug = False
     lang = "en"
@@ -85,11 +83,12 @@ def query():
     service_context = _get_service_context(temperature)
 
     # Query ChatGPT / embeddings deployment(s)
-    index = get_index()
+    index = _get_index(service_context, "./storage2")
     query_engine = index.as_query_engine(mode="embedding", 
                                         text_qa_template=_get_prompt_template(lang), 
                                         similarity_top_k=k, 
-                                        response_mode="tree_summarize", 
+                                        # https://github.com/jerryjliu/llama_index/blob/main/docs/guides/primer/usage_pattern.md#configuring-response-synthesis
+                                        response_mode="tree_summarize", # other modes are default and compact 
                                         refine_template=_get_refined_prompt(lang), service_context=service_context)
     response = query_engine.query(query)
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
@@ -100,21 +99,69 @@ def query():
         return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes], 'logs': service_context.llama_logger.get_logs()})
     else:
         return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
-       
-def get_index() -> "GPTVectorStoreIndex":
+    
+@app.route("/build", methods=["POST"])
+def build_index():
+    logging.info("Creating index...")
+    container_name = "itsm"
+    container_client = blob_service_client.get_container_client(container=container_name)
+
+    #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
+    for blob in container_client.list_blobs():
+        _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
+    
+    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True).load_data()
+    #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
+
+    service_context = _get_service_context()
+    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    index.storage_context.persist(persist_dir=container_name)
+
+    #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    return jsonify({'msg': "index loaded successfully"})
+
+"""
+Download files from an Azure Blob storage to the local FS
+""" 
+def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
+
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+    isExist = os.path.exists(_basepath + os.path.dirname(blob_name))
+    if not isExist:
+        os.makedirs(_basepath + os.path.dirname(blob_name))
+
+    with open(file=_basepath + blob_name, mode="wb") as sample_blob:
+        download_stream = blob_client.download_blob()
+        sample_blob.write(download_stream.readall())
+"""
+Loads a Vector Index from the local filesystem
+"""    
+def _get_index(storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
     # check if index file is present on fs ortherwise build it ...
     try:
-        storage_context = StorageContext.from_defaults(persist_dir=DEFAULT_PERSIST_DIR)
-        return load_index_from_storage(storage_context)
-    except HTTPException:
-        return InternalServerError()
-"""
-
-TODO: Move the two functions below to their own application service
+        if os.path.exists(storage_location):
+            storage_context = StorageContext.from_defaults(persist_dir=storage_location)
+            return load_index_from_storage(storage_context)
+    except:
+        return jsonify({'error', f'unable to load index: {storage_name}'}), 400
 
 
-""" 
-def _get_service_context(temperature: str = 0.7) -> "ServiceContext":
+def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
+
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+
+    # azure function app only allows write to /tmp on the file system
+    isExist = os.path.exists(_basepath + os.path.dirname(blob_name))
+    if not isExist:
+        os.makedirs(_basepath + os.path.dirname(blob_name))
+
+    with open(file=_basepath + blob_name, mode="wb") as sample_blob:
+        download_stream = blob_client.download_blob()
+        sample_blob.write(download_stream.readall())
+
+def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     # Define prompt helper
     max_input_size = 4096
     num_output = 256 #hard limit
@@ -207,37 +254,3 @@ def _get_refined_prompt(lang: str):
 
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
-
-@app.route("/build", methods=["POST"])
-def build_index():
-    logging.info("Creating index...")
-    container_name = "itsm"
-    container_client = blob_service_client.get_container_client(container=container_name)
-
-    #TODO: terrible way to do things, index should be generated elsewhere and simply loaded here.
-    for blob in container_client.list_blobs():
-        _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
-    
-    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True).load_data()
-    #logging.info("The documents are:" + ''.join(str(x.doc_id) for x in documents))
-
-    service_context = _get_service_context()
-    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    index.storage_context.persist()
-
-    #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    return jsonify({'index': "index loaded successfully"})
-    
-def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
-
-    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-
-    # azure function app only allows write to /tmp on the file system
-    isExist = os.path.exists(_basepath + os.path.dirname(blob_name))
-    if not isExist:
-        os.makedirs(_basepath + os.path.dirname(blob_name))
-
-    with open(file=_basepath + blob_name, mode="wb") as sample_blob:
-        download_stream = blob_client.download_blob()
-        sample_blob.write(download_stream.readall())
