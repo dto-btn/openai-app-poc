@@ -4,6 +4,6 @@ azure-storage-blob
 Flask
 gunicorn
 langchain
-llama-index==0.6.5
+llama-index==0.6.0
 openai
 python-dotenv

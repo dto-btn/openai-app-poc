@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import List
+import sys
 
 import openai
 from azure.identity import DefaultAzureCredential
@@ -24,6 +25,9 @@ from langchain.prompts.chat import (
 
 from llama_index.prompts.prompts import RefinePrompt
 from llama_index.indices.composability import ComposableGraph
+
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
 load_dotenv()
 
@@ -90,29 +94,34 @@ def query():
         si = _get_index(storage_name=i)
         if not isinstance(si, GPTVectorStoreIndex): # error loading the index ...
             return jsonify({'error':f'unable to load index: {i}'}), 500
-        indices[i] = si
+        if i is "itsm":
+            indices[i] = (si, "Contains various information about ITSM, EVEC and Onyx systems.")
+        elif i is "sscplus":
+            indices[i] = (si, "Contains generic information about processes, branches and offices inside Shared Services Canada (SSC).")
+        else:
+            indices[i] = (si, i)
 
-    for k,v in indices.items():
-        print(f"this is index: {k} and this is the index id: {v.index_id}")
-
-    # Query ChatGPT / embeddings deployment(s)
-    #index = _get_index(storage_name=index_name)
-    graph = ComposableGraph.from_indices(GPTVectorStoreIndex, [v for v in indices.values()] , index_summaries=[i for i in indices])
-
+    graph = ComposableGraph.from_indices(GPTListIndex, [v[0] for v in indices.values()] , index_summaries=[v[1] for v in indices.values()])
+    
     custom_query_engines = {
-        i.index_id: i.as_query_engine(
+        i[0].index_id: i[0].as_query_engine(
             mode="embedding", 
             text_qa_template=_get_prompt_template(lang), 
             similarity_top_k=k, 
             # https://github.com/jerryjliu/llama_index/blob/main/docs/guides/primer/usage_pattern.md#configuring-response-synthesis
             response_mode="tree_summarize", # other modes are default and compact 
-            refine_template=_get_refined_prompt(lang), service_context=service_context
-        )    
+            refine_template=_get_refined_prompt(lang), 
+            service_context=service_context
+        )
         for i in indices.values()
     }
 
+    custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
+        response_mode="tree_summarize",
+        service_context=service_context,
+    )
+
     query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
-    
     response = query_engine.query(query)
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
     #print(response.get_formatted_sources())
