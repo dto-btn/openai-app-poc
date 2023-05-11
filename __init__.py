@@ -62,12 +62,12 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    indices = []
+    index = []
 
-    if "query" not in body or "indices" not in body:
-        return jsonify({"error":"Request body must contain a query and indices"}), 400
+    if "query" not in body or "index" not in body:
+        return jsonify({"error":"Request body must contain a query and index"}), 400
     else:
-        indices = request.json["indices"]
+        index = request.json["index"]
         query = request.json["query"]
            
     if "temp" in body:
@@ -85,23 +85,34 @@ def query():
 
     service_context = _get_service_context(temperature)
 
-    indices = dict()
-    for i in indices:
-        index = _get_index(storage_name=i)
-        if not isinstance(index, GPTVectorStoreIndex): # error loading the index ...
+    indices = {}
+    for i in index:
+        si = _get_index(storage_name=i)
+        if not isinstance(si, GPTVectorStoreIndex): # error loading the index ...
             return jsonify({'error':f'unable to load index: {i}'}), 500
-        indices["i"] = index
+        indices[i] = si
+
+    for k,v in indices.items():
+        print(f"this is index: {k} and this is the index id: {v.index_id}")
 
     # Query ChatGPT / embeddings deployment(s)
     #index = _get_index(storage_name=index_name)
-    graph = ComposableGraph.from_indices(GPTVectorStoreIndex, [i.value() for i in indices] , index_summaries=[i.key() for i in indices])
+    graph = ComposableGraph.from_indices(GPTVectorStoreIndex, [v for v in indices.values()] , index_summaries=[i for i in indices])
 
-    query_engine = graph.as_query_engine(mode="embedding", 
-                                        text_qa_template=_get_prompt_template(lang), 
-                                        similarity_top_k=k, 
-                                        # https://github.com/jerryjliu/llama_index/blob/main/docs/guides/primer/usage_pattern.md#configuring-response-synthesis
-                                        response_mode="tree_summarize", # other modes are default and compact 
-                                        refine_template=_get_refined_prompt(lang), service_context=service_context)
+    custom_query_engines = {
+        i.index_id: i.as_query_engine(
+            mode="embedding", 
+            text_qa_template=_get_prompt_template(lang), 
+            similarity_top_k=k, 
+            # https://github.com/jerryjliu/llama_index/blob/main/docs/guides/primer/usage_pattern.md#configuring-response-synthesis
+            response_mode="tree_summarize", # other modes are default and compact 
+            refine_template=_get_refined_prompt(lang), service_context=service_context
+        )    
+        for i in indices.values()
+    }
+
+    query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
+    
     response = query_engine.query(query)
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
     #print(response.get_formatted_sources())
@@ -159,7 +170,6 @@ def _get_index(storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -
     # check if index file is present on fs ortherwise build it ...
     loc = os.path.join(storage_location, storage_name)
     if os.path.exists(loc):
-        print("found path...")
         try:
             storage_context = StorageContext.from_defaults(persist_dir=loc)
             return load_index_from_storage(storage_context)
