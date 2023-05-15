@@ -130,13 +130,24 @@ def query():
     #print(response.get_formatted_sources())
     #print(service_context.llama_logger.get_logs())
 
+    metadata = {}
     for node in response.source_nodes:
-        print(node.extra_info)
+        #print(node.node.extra_info)
+        info = node.node.extra_info
+        if 'filename' in info:
+            if info['filename'] not in metadata:
+                metadata[info['filename']] = info['lastmodified']
+
+    r = {'query':query,
+         'answer':str(response),
+         'nodes_score':[node.score for node in response.source_nodes],
+         'metadata': metadata
+        }
 
     if debug:
-        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes], 'logs': service_context.llama_logger.get_logs()})
-    else:
-        return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes]})
+        r['logs'] = service_context.llama_logger.get_logs()
+
+    return jsonify(r)
     
 @app.route("/build", methods=["POST"])
 def build_index():
