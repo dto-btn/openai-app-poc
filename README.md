@@ -65,3 +65,7 @@ whoami
 net localgroup "docker-users" "<your username>" /add
 ```
 You should see something like `Command completed successfully` then logout and then you can start `Docker Desktop`.
+
+## Using Azure Cognitive Search
+
+https://github.com/Azure-Samples/azure-search-openai-demo/blob/main/app/backend/app.py

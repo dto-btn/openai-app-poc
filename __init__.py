@@ -116,12 +116,16 @@ def query():
         for i in indices.values()
     }
 
-    custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
-        response_mode="tree_summarize",
-        service_context=service_context,
-    )
+    if(len(indices) == 1):
+        query_engine = list(custom_query_engines.values())[0]
+    else:
+        custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
+            response_mode="tree_summarize",
+            service_context=service_context,
+        )
 
-    query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
+        query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
+
     response = query_engine.query(query)
     #return StreamingResponse(index.query(query, streaming=True).response_gen)
     #print(response.get_formatted_sources())
@@ -196,16 +200,25 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = AzureChatOpenAI(deployment_name=deployment_name, 
-                          temperature=temperature, 
-                          openai_api_version=openai_api_version)
+                            temperature=temperature,)
     print(llm)
     # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
-    llm_predictor = ChatGPTLLMPredictor(llm=llm)
+    llm_predictor = ChatGPTLLMPredictor(llm=llm,)
 
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
 
     # limit is chunk size 1 atm
-    embedding_llm = LangchainEmbedding(OpenAIEmbeddings(model="text-embedding-ada-002", chunk_size=1, openai_api_version=openai_api_version))
+    embedding_llm = LangchainEmbedding(
+        OpenAIEmbeddings(
+            model="text-embedding-ada-002",
+            deployment="text-embedding-ada-002", 
+            chunk_size=1, 
+            openai_api_key= openai.api_key,
+            openai_api_base=openai.api_base,
+            openai_api_type=openai.api_type,
+            openai_api_version=openai.api_version,
+            ), 
+        embed_batch_size=1)
 
     llama_logger = LlamaLogger()
 
