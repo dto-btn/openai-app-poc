@@ -1,7 +1,8 @@
 import logging
 import os
-from typing import List
 import sys
+import time
+from typing import List
 
 import openai
 from azure.identity import DefaultAzureCredential
@@ -11,20 +12,18 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
-from llama_index import (GPTVectorStoreIndex, LangchainEmbedding,
-                        PromptHelper, QuestionAnswerPrompt,
-                        ServiceContext, download_loader, StorageContext, load_index_from_storage, GPTListIndex)
-from llama_index.llm_predictor.chatgpt import ChatGPTLLMPredictor
-from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
-from llama_index.logger import LlamaLogger
-from langchain.prompts.chat import (
-    AIMessagePromptTemplate,
-    ChatPromptTemplate,
-    HumanMessagePromptTemplate,
-)
-
-from llama_index.prompts.prompts import RefinePrompt
+from langchain.prompts.chat import (AIMessagePromptTemplate,
+                                    ChatPromptTemplate,
+                                    HumanMessagePromptTemplate)
+from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
+                         PromptHelper, QuestionAnswerPrompt, ServiceContext,
+                         StorageContext, download_loader,
+                         load_index_from_storage)
 from llama_index.indices.composability import ComposableGraph
+from llama_index.llm_predictor import LLMPredictor
+from llama_index.logger import LlamaLogger
+from llama_index.prompts.prompts import RefinePrompt
+from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -131,6 +130,9 @@ def query():
     #print(response.get_formatted_sources())
     #print(service_context.llama_logger.get_logs())
 
+    for node in response.source_nodes:
+        print(node.extra_info)
+
     if debug:
         return jsonify({'query':query,'answer':str(response),'nodes_score':[node.score for node in response.source_nodes], 'logs': service_context.llama_logger.get_logs()})
     else:
@@ -150,9 +152,12 @@ def build_index():
     container_client = blob_service_client.get_container_client(container=container_name)
     for blob in container_client.list_blobs():
         _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
+
+    #filename_fn = lambda filename: {'filename': filename}
+
     
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True).load_data()
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=filename_fn).load_data()
 
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
@@ -203,14 +208,13 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
                             temperature=temperature,)
     print(llm)
     # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
-    llm_predictor = ChatGPTLLMPredictor(llm=llm,)
+    llm_predictor = LLMPredictor(llm=llm,)
 
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
         OpenAIEmbeddings(
-            model="text-embedding-ada-002",
             deployment="text-embedding-ada-002", 
             chunk_size=1, 
             openai_api_key= openai.api_key,
@@ -293,3 +297,13 @@ def _get_refined_prompt(lang: str):
 
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
+
+def filename_fn(filename: str) -> dict:
+    # gather metadata about the file or url ... and add it as a dict
+    lastmod = time.ctime(os.path.getmtime(filename))
+
+    fn = filename
+    if fn.startswith("container/"):
+        fn = fn.split("container/")[1]
+
+    return {"filename": fn, "lastmodified": lastmod}
