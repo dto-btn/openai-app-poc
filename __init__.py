@@ -25,6 +25,10 @@ from llama_index.logger import LlamaLogger
 from llama_index.prompts.prompts import RefinePrompt
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
+from llama_index.response.schema import (
+    RESPONSE_TYPE,
+)
+
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
@@ -93,9 +97,9 @@ def query():
         si = _get_index(storage_name=i)
         if not isinstance(si, GPTVectorStoreIndex): # error loading the index ...
             return jsonify({'error':f'unable to load index: {i}'}), 500
-        if i is "itsm":
+        if i == "itsm":
             indices[i] = (si, "Contains various information about ITSM, EVEC and Onyx systems.")
-        elif i is "sscplus":
+        elif i == "sscplus":
             indices[i] = (si, "Contains generic information about processes, branches and offices inside Shared Services Canada (SSC).")
         else:
             indices[i] = (si, i)
@@ -130,18 +134,12 @@ def query():
     #print(response.get_formatted_sources())
     #print(service_context.llama_logger.get_logs())
 
-    metadata = {}
-    for node in response.source_nodes:
-        #print(node.node.extra_info)
-        info = node.node.extra_info
-        if 'filename' in info:
-            if info['filename'] not in metadata:
-                metadata[info['filename']] = info['lastmodified']
+    metadata = _response_metadata(response)
 
-    r = {'query':query,
-         'answer':str(response),
-         'nodes_score':[node.score for node in response.source_nodes],
-         'metadata': metadata
+    r = {
+            'query':query,
+            'answer':str(response),
+            'metadata': metadata
         }
 
     if debug:
@@ -165,10 +163,9 @@ def build_index():
         _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
 
     #filename_fn = lambda filename: {'filename': filename}
-
-    
+   
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=filename_fn).load_data()
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
 
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
@@ -309,7 +306,11 @@ def _get_refined_prompt(lang: str):
     CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
     return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
 
-def filename_fn(filename: str) -> dict:
+"""
+Metadata building for the index nodes, stored in extra_info at response time.
+
+"""
+def _filename_fn(filename: str) -> dict:
     # gather metadata about the file or url ... and add it as a dict
     lastmod = time.ctime(os.path.getmtime(filename))
 
@@ -318,3 +319,24 @@ def filename_fn(filename: str) -> dict:
         fn = fn.split("container/")[1]
 
     return {"filename": fn, "lastmodified": lastmod}
+
+def _response_metadata(response: RESPONSE_TYPE) -> dict:
+    metadata = {}
+    scores = {}
+    [print(str(node.score) + " and docid " + str(node.node.ref_doc_id)) for node in response.source_nodes]
+
+    for node in response.source_nodes:
+        print("docid " + str(node.node.ref_doc_id) + " and here is the current node score: " + str(node.score))
+        if node.node.ref_doc_id not in metadata:
+            scores[node.node.ref_doc_id] = [node.score]
+            info = node.node.extra_info
+            if 'filename' in info:
+                metadata[node.node.ref_doc_id] = {"filename": info['filename']}
+        else:
+            scores[node.node.ref_doc_id].append(node.score)
+
+    [v.update({"node_scores": scores[k]}) for k, v in metadata.items()]
+
+    print("docid " + str(node.node.ref_doc_id) + " and here is the current node scores: " + str(metadata.get(node.node.ref_doc_id).get("node_scores")))
+
+    return metadata
