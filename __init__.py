@@ -65,7 +65,7 @@ def query():
 
     query = ""
     k = 3 # default
-    temperature = 0.7 # default
+    #temperature = 0.7 # default
     body = request.json
     debug = False
     lang = "en"
