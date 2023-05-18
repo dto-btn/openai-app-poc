@@ -7,3 +7,4 @@ langchain
 llama-index==0.6.0
 openai
 python-dotenv
+bs4

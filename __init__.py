@@ -29,6 +29,8 @@ from llama_index.response.schema import (
     RESPONSE_TYPE,
 )
 
+from bs4 import BeautifulSoup
+
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
@@ -69,13 +71,15 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    index = []
+    index = ["unstructureddocs-all"] # default ..
 
-    if "query" not in body or "index" not in body:
-        return jsonify({"error":"Request body must contain a query and index"}), 400
+    if "query" not in body:
+        return jsonify({"error":"Request body must contain a query."}), 400
     else:
-        index = request.json["index"]
         query = request.json["query"]
+
+    if "index" in body:
+        index = request.json["index"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -152,15 +156,20 @@ def build_index():
     if "name" not in request.json:
         return jsonify({"error":"Request body must contain a name for the index to create"}), 400
     
+    download = True
+    if "download" in request.json:
+        download = bool(request.json["download"])
+    
     container_name = request.json['name']
     storage = DEFAULT_PERSIST_DIR
 
     if "storage" in request.json:
         storage = request.json["storage"]
 
-    container_client = blob_service_client.get_container_client(container=container_name)
-    for blob in container_client.list_blobs():
-        _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
+    if download:
+        container_client = blob_service_client.get_container_client(container=container_name)
+        for blob in container_client.list_blobs():
+            _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
 
     #filename_fn = lambda filename: {'filename': filename}
    
@@ -176,7 +185,9 @@ def build_index():
     return jsonify({'msg': "index loaded successfully"})
 
 """
+
 Download files from an Azure Blob storage to the local FS
+
 """ 
 def _download_blob_to_file(blob_service_client: BlobServiceClient, container_name, blob_name):
 
@@ -189,8 +200,11 @@ def _download_blob_to_file(blob_service_client: BlobServiceClient, container_nam
     with open(file=_basepath + blob_name, mode="wb") as sample_blob:
         download_stream = blob_client.download_blob()
         sample_blob.write(download_stream.readall())
+
 """
+
 Loads a Vector Index from the local filesystem
+
 """    
 def _get_index(storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
     # check if index file is present on fs ortherwise build it ...
@@ -309,29 +323,39 @@ def _get_refined_prompt(lang: str):
 """
 Metadata building for the index nodes, stored in extra_info at response time.
 
+filenames will look like this comming in : container/sscplus/sites/default/files/2022-12/cgci-web.docx
+
 """
 def _filename_fn(filename: str) -> dict:
+
+    print(f"Processing current filename: {filename}")
     # gather metadata about the file or url ... and add it as a dict
     lastmod = time.ctime(os.path.getmtime(filename))
+    fn = os.path.basename(filename)
+    url = ""
 
-    fn = filename
-    if fn.startswith("container/"):
-        fn = fn.split("container/")[1]
+    # check if it's an html file, if so treat it as a url instead.
+    if filename.endswith(".html"):
+        # parse html file for the meta tag `canonical` and grab url. else leave it blank..
+        with open(filename, "r") as fp:
+            soup = BeautifulSoup(fp, "html.parser", from_encoding="UTF-8")
+            url = soup.find('link', {'rel': 'canonical'})['href']
+            print(f"Found URL in html file: {url}")
 
-    return {"filename": fn, "lastmodified": lastmod}
+    # first level will be _basepath, we ignore it and we take the first level folder which is the "source"
+    source = filename.split(os.path.sep)[1]
+
+    return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
 
 def _response_metadata(response: RESPONSE_TYPE) -> dict:
     metadata = {}
     scores = {}
-    [print(str(node.score) + " and docid " + str(node.node.ref_doc_id)) for node in response.source_nodes]
 
     for node in response.source_nodes:
         print("docid " + str(node.node.ref_doc_id) + " and here is the current node score: " + str(node.score))
         if node.node.ref_doc_id not in metadata:
             scores[node.node.ref_doc_id] = [node.score]
-            info = node.node.extra_info
-            if 'filename' in info:
-                metadata[node.node.ref_doc_id] = {"filename": info['filename']}
+            metadata[node.node.ref_doc_id] = node.node.extra_info
         else:
             scores[node.node.ref_doc_id].append(node.score)
 
