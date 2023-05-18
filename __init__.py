@@ -72,6 +72,7 @@ def query():
     debug = False
     lang = "en"
     index = ["unstructureddocs-all"] # default ..
+    pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -89,6 +90,9 @@ def query():
 
     if "debug" in body:
         debug = bool(request.json["debug"])
+
+    if "pretty" in body:
+        pretty = bool(request.json["pretty"])
 
     if "lang" in body:
         if str(request.json["lang"]) == "fr":
@@ -138,7 +142,7 @@ def query():
     #print(response.get_formatted_sources())
     #print(service_context.llama_logger.get_logs())
 
-    metadata = _response_metadata(response)
+    metadata = _response_metadata(response, pretty)
 
     r = {
             'query':query,
@@ -347,20 +351,26 @@ def _filename_fn(filename: str) -> dict:
 
     return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
 
-def _response_metadata(response: RESPONSE_TYPE) -> dict:
+def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
     metadata = {}
-    scores = {}
+    if not pretty:
+        scores = {}
+        for node in response.source_nodes:
+            print("docid " + str(node.node.ref_doc_id) + " and here is the current node score: " + str(node.score))
+            if node.node.ref_doc_id not in metadata:
+                scores[node.node.ref_doc_id] = [node.score]
+                metadata[node.node.ref_doc_id] = node.node.extra_info
+            else:
+                scores[node.node.ref_doc_id].append(node.score)
 
-    for node in response.source_nodes:
-        print("docid " + str(node.node.ref_doc_id) + " and here is the current node score: " + str(node.score))
-        if node.node.ref_doc_id not in metadata:
-            scores[node.node.ref_doc_id] = [node.score]
-            metadata[node.node.ref_doc_id] = node.node.extra_info
-        else:
-            scores[node.node.ref_doc_id].append(node.score)
-
-    [v.update({"node_scores": scores[k]}) for k, v in metadata.items()]
-
-    print("docid " + str(node.node.ref_doc_id) + " and here is the current node scores: " + str(metadata.get(node.node.ref_doc_id).get("node_scores")))
+        [v.update({"node_scores": scores[k]}) for k, v in metadata.items()]
+    else:
+        simple = []
+        for node in response.source_nodes:
+            if node.node.ref_doc_id not in metadata:
+                metadata[node.node.ref_doc_id] = None
+                info = node.node.extra_info
+                simple.append(info['url'] if info['url'] != "" else f"{info['filename']} ({info['source']})")
+        metadata = simple
 
     return metadata
