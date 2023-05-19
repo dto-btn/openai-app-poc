@@ -329,7 +329,7 @@ def _filename_fn(filename: str) -> dict:
             since we do not have the proper html content as of now ..
     '''
     if filename.endswith(".txt") and source == "sscplus":
-        f = ''.join(filename.split("sscplus", 1)).replace(".txt", ".html")
+        f = ''.join(filename.split("container/sscplus/", 1)).replace(".txt", "")
         url = f"https://plus.ssc-spc.gc.ca/{f}"
 
     return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
