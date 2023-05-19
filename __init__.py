@@ -8,6 +8,7 @@ import openai
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from langchain.chat_models import AzureChatOpenAI
@@ -15,21 +16,17 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.prompts.chat import (AIMessagePromptTemplate,
                                     ChatPromptTemplate,
                                     HumanMessagePromptTemplate)
-from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
-                         PromptHelper, QuestionAnswerPrompt, ServiceContext,
-                         StorageContext, download_loader,
-                         load_index_from_storage)
-from llama_index.indices.composability import ComposableGraph
+from llama_index import (GPTVectorStoreIndex, LangchainEmbedding,
+                         PromptHelper, QuestionAnswerPrompt,
+                         ResponseSynthesizer, ServiceContext, StorageContext,
+                         download_loader, load_index_from_storage)
+from llama_index.indices.postprocessor import SimilarityPostprocessor
 from llama_index.llm_predictor import LLMPredictor
 from llama_index.logger import LlamaLogger
 from llama_index.prompts.prompts import RefinePrompt
+from llama_index.query_engine import RetrieverQueryEngine
+from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
-
-from llama_index.response.schema import (
-    RESPONSE_TYPE,
-)
-
-from bs4 import BeautifulSoup
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -66,7 +63,7 @@ def health():
 def query():
 
     query = ""
-    k = 3 # default
+    k = 2 # default
     temperature = 0.7 # default
     body = request.json
     debug = False
@@ -99,49 +96,32 @@ def query():
             lang = "fr"
 
     service_context = _get_service_context(temperature)
+    index = _get_index(service_context=service_context, storage_name=index[0])
 
-    indices = {}
-    for i in index:
-        si = _get_index(storage_name=i)
-        if not isinstance(si, GPTVectorStoreIndex): # error loading the index ...
-            return jsonify({'error':f'unable to load index: {i}'}), 500
-        if i == "itsm":
-            indices[i] = (si, "Contains various information about ITSM, EVEC and Onyx systems.")
-        elif i == "sscplus":
-            indices[i] = (si, "Contains generic information about processes, branches and offices inside Shared Services Canada (SSC).")
-        else:
-            indices[i] = (si, i)
+    retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
+    # configure retriever
+    # retriever = VectorIndexRetriever(
+    #     index=index, 
+    #     similarity_top_k=2,
+    # )
 
-    graph = ComposableGraph.from_indices(GPTListIndex, [v[0] for v in indices.values()] , index_summaries=[v[1] for v in indices.values()])
-    
-    custom_query_engines = {
-        i[0].index_id: i[0].as_query_engine(
-            mode="embedding", 
-            text_qa_template=_get_prompt_template(lang), 
-            similarity_top_k=k, 
-            # https://github.com/jerryjliu/llama_index/blob/main/docs/guides/primer/usage_pattern.md#configuring-response-synthesis
-            response_mode="tree_summarize", # other modes are default and compact 
-            refine_template=_get_refined_prompt(lang), 
-            service_context=service_context
-        )
-        for i in indices.values()
-    }
+    # configure response synthesizer
+    response_synthesizer = ResponseSynthesizer.from_args(
+        node_postprocessors=[
+            SimilarityPostprocessor(similarity_cutoff=0.7)
+        ],
+    )
 
-    if(len(indices) == 1):
-        query_engine = list(custom_query_engines.values())[0]
-    else:
-        custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
-            response_mode="tree_summarize",
-            service_context=service_context,
-        )
-
-        query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
+    # assemble query engine
+    query_engine = RetrieverQueryEngine.from_args(
+        retriever=retriever,
+        response_synthesizer=response_synthesizer,
+        service_context=service_context,
+        text_qa_template=_get_prompt_template(lang),
+        refine_template=_get_refined_prompt(lang), 
+    )
 
     response = query_engine.query(query)
-    #return StreamingResponse(index.query(query, streaming=True).response_gen)
-    #print(response.get_formatted_sources())
-    #print(service_context.llama_logger.get_logs())
-
     metadata = _response_metadata(response, pretty)
 
     r = {
@@ -210,13 +190,13 @@ def _download_blob_to_file(blob_service_client: BlobServiceClient, container_nam
 Loads a Vector Index from the local filesystem
 
 """    
-def _get_index(storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
+def _get_index(service_context: ServiceContext, storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
     # check if index file is present on fs ortherwise build it ...
     loc = os.path.join(storage_location, storage_name)
     if os.path.exists(loc):
         try:
             storage_context = StorageContext.from_defaults(persist_dir=loc)
-            return load_index_from_storage(storage_context)
+            return load_index_from_storage(service_context=service_context, storage_context=storage_context)
         except:
             return None
     else:
@@ -231,7 +211,7 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = AzureChatOpenAI(deployment_name=deployment_name, 
-                            temperature=temperature,)
+                            temperature=temperature)
     print(llm)
     # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
     llm_predictor = LLMPredictor(llm=llm,)
@@ -241,14 +221,9 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
         OpenAIEmbeddings(
-            deployment="text-embedding-ada-002", 
-            chunk_size=1, 
-            openai_api_key= openai.api_key,
-            openai_api_base=openai.api_base,
-            openai_api_type=openai.api_type,
-            openai_api_version=openai.api_version,
+            model="text-embedding-ada-002",
             ), 
-        embed_batch_size=1)
+            embed_batch_size=1)
 
     llama_logger = LlamaLogger()
 
@@ -348,6 +323,14 @@ def _filename_fn(filename: str) -> dict:
 
     # first level will be _basepath, we ignore it and we take the first level folder which is the "source"
     source = filename.split(os.path.sep)[1]
+
+    '''
+    WARN: Temporary "trick" to process sscplus .txt files as they were html 
+            since we do not have the proper html content as of now ..
+    '''
+    if filename.endswith(".txt") and source == "sscplus":
+        f = ''.join(filename.split("sscplus", 1)).replace(".txt", ".html")
+        url = f"https://plus.ssc-spc.gc.ca/{f}"
 
     return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
 
