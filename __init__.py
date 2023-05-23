@@ -71,6 +71,8 @@ def query():
     index = ["unstructureddocs-all"] # default ..
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
 
+    chat_history = ""
+
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
     else:
@@ -78,6 +80,10 @@ def query():
 
     if "index" in body:
         index = request.json["index"]
+
+    if "chat_history" in body:
+        chat_history = request.json["chat_history"]
+        print("Here is the chat_history we received: " + chat_history)
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -117,17 +123,21 @@ def query():
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=_get_prompt_template(lang),
-        refine_template=_get_refined_prompt(lang), 
+        text_qa_template=_get_prompt_template(lang, chat_history),
+        refine_template=_get_refined_prompt(lang),
+        response_mode="tree_summarize"
     )
 
     response = query_engine.query(query)
     metadata = _response_metadata(response, pretty)
 
+    chat_history = _build_chat_history(chat_history, query, str(response), lang)
+
     r = {
             'query':query,
             'answer':str(response),
-            'metadata': metadata
+            'metadata': metadata,
+            'chat_history': chat_history
         }
 
     if debug:
@@ -240,21 +250,25 @@ SEE:
     * https://github.com/jerryjliu/llama_index/issues/1335
 
 """
-def _get_prompt_template(lang: str):
+def _get_prompt_template(lang: str, chat_history: str):
 
     if lang == "fr":
         QA_PROMPT_TMPL = (
-            "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous. \n"
+            "Vous êtes un assistant robot de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
             "---------------------\n"
             "{context_str}"
+            "\n---------------------\n"
+            f"{chat_history}\n"
             "\n---------------------\n"
             "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
         )
     else:
         QA_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) assistant. We have provided context information below. \n"
+            "You are a Shared Services Canada (SSC) robot assistant. We have provided context information below.\n"
             "---------------------\n"
             "{context_str}"
+            "\n---------------------\n"
+            f"{chat_history}\n"
             "\n---------------------\n"
             "Given this information, please answer the question: {query_str}\n"
     )
@@ -357,3 +371,16 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
         metadata = simple
 
     return metadata
+
+'''
+Builds the chat history to be passed back and forth to the chat prompt.
+'''
+def _build_chat_history(chat_history: str, query: str, response: str, lang: str) -> str:
+    if chat_history == "":
+        chat_history = "Here is the conversation history:\n"
+        if lang == "fr":
+            chat_history = "Voici un historique de la conversation:\n"
+    if lang == "fr":
+        return chat_history + f"L'humain a demandé: {query}\n" + f"Le robot a répondu: {response}\n"
+    else:
+        return chat_history + f"Human asked: {query}\n" + f"Robot responded: {response}\n"
