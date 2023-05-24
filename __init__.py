@@ -83,7 +83,6 @@ def query():
 
     if "chat_history" in body:
         chat_history = request.json["chat_history"]
-        print("Here is the chat_history we received: " + chat_history)
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -124,7 +123,7 @@ def query():
         response_synthesizer=response_synthesizer,
         service_context=service_context,
         text_qa_template=_get_prompt_template(lang, chat_history),
-        refine_template=_get_refined_prompt(lang),
+        #refine_template=_get_refined_prompt(lang),
         response_mode="tree_summarize"
     )
 
@@ -256,9 +255,9 @@ def _get_prompt_template(lang: str, chat_history: str):
         QA_PROMPT_TMPL = (
             "Vous êtes un assistant robot de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
             "---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
             f"{chat_history}\n"
+            "\n---------------------\n"
+            "{context_str}"
             "\n---------------------\n"
             "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
         )
@@ -266,9 +265,9 @@ def _get_prompt_template(lang: str, chat_history: str):
         QA_PROMPT_TMPL = (
             "You are a Shared Services Canada (SSC) robot assistant. We have provided context information below.\n"
             "---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
             f"{chat_history}\n"
+            "\n---------------------\n"
+            "{context_str}"
             "\n---------------------\n"
             "Given this information, please answer the question: {query_str}\n"
     )
