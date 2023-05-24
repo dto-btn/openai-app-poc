@@ -11,25 +11,31 @@ from azure.storage.blob import BlobServiceClient
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from langchain.chains.conversation.memory import ConversationBufferMemory
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.prompts.chat import (AIMessagePromptTemplate,
                                     ChatPromptTemplate,
                                     HumanMessagePromptTemplate)
-from llama_index import (GPTVectorStoreIndex, LangchainEmbedding,
+from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
                          PromptHelper, QuestionAnswerPrompt,
                          ResponseSynthesizer, ServiceContext, StorageContext,
                          download_loader, load_index_from_storage)
+from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
+from llama_index.indices.query.query_transform.base import \
+    DecomposeQueryTransform
+from llama_index.langchain_helpers.agents import (IndexToolConfig,
+                                                  LlamaToolkit,
+                                                  create_llama_chat_agent)
 from llama_index.llm_predictor import LLMPredictor
 from llama_index.logger import LlamaLogger
 from llama_index.prompts.prompts import RefinePrompt
 from llama_index.query_engine import RetrieverQueryEngine
+from llama_index.query_engine.transform_query_engine import \
+    TransformQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
-
-from langchain.chains.conversation.memory import ConversationBufferMemory
-from llama_index.langchain_helpers.agents import LlamaToolkit, create_llama_chat_agent, IndexToolConfig, create_llama_agent
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -102,11 +108,46 @@ def query():
 
     service_context = _get_service_context(temperature)
 
+    # define a list index over the vector indices
+    # allows us to synthesize information across each index
+    index_set = {}
+    for name in index:
+        index_set[name] = _get_index(service_context=service_context, storage_name=name)
+
+    index_summaries = [f"Vector index ({name}) that contains internal Shared Services Canada (SSC) information" for name in index]
+    graph = ComposableGraph.from_indices(
+        GPTListIndex,
+        [index_set[name] for name in index], 
+        index_summaries=index_summaries,
+        service_context=service_context,
+    )
+
+    llm = _get_llm(temperature)
+    decompose_transform = DecomposeQueryTransform(
+        _get_llm_predictor(llm), verbose=True
+    )
+
+    custom_query_engines = {}
+    for index in index_set.values():
+        query_engine = index.as_query_engine()
+        query_engine = TransformQueryEngine(
+            query_engine,
+            query_transform=decompose_transform,
+            transform_extra_info={'index_summary': index.index_struct.summary},
+        )
+        custom_query_engines[index.index_id] = query_engine
+    
+    custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
+        response_mode='tree_summarize',
+        verbose=True,
+    )
+
+    # construct query engine
+    graph_query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
 
     index_configs = []
-    for name in index:
-        ind = _get_index(service_context=service_context, storage_name=name)
-        retriever = ind.as_retriever(retriever_mode="embedding", similarity_top_k=k)
+    for index in index_set.values():
+        retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
         # configure response synthesizer
         response_synthesizer = ResponseSynthesizer.from_args(
             node_postprocessors=[
@@ -123,15 +164,23 @@ def query():
             response_mode="tree_summarize",
             verbose=True
         )
-        index_configs.append(IndexToolConfig(query_engine=query_engine, 
-                                            tool_kwargs={"return_direct": True},
+        tool_config = IndexToolConfig(query_engine=query_engine, 
                                             name=f"Vector Index: {name}",
-                                            description="Various information about Shared Service Canada intranet and departemental information",))
+                                            description="Various information about Shared Service Canada intranet and departemental information",
+                                            tool_kwargs={"return_direct": True, "return_sources": True})
+        index_configs.append(tool_config)
+        
+    # graph config
+    graph_config = IndexToolConfig(
+        query_engine=graph_query_engine,
+            name=f"Graph Index",
+            description="useful for when you want to answer queries that require analyzing multiple SEC 10-K documents for Uber.",
+            tool_kwargs={"return_direct": True, "return_sources": True},
+            return_sources=True
+    )
 
-    toolkit = LlamaToolkit(index_configs=index_configs)
+    toolkit = LlamaToolkit(index_configs=index_configs, graph_config=graph_config)
 
-
-    llm = _get_llm(temperature)
     agent_chain = create_llama_chat_agent(
         toolkit,
         llm,
@@ -139,7 +188,7 @@ def query():
         verbose=True
     )
     response = agent_chain.run(input=query)
-    response = query_engine.query(query)
+    #response = query_engine.query(query)
     #metadata = _response_metadata(response, pretty)
 
     r = {
@@ -232,7 +281,7 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
 
     logging.info(llm)
     # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
-    llm_predictor = LLMPredictor(llm=llm,)
+    llm_predictor = _get_llm_predictor(llm)
 
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
 
@@ -247,6 +296,9 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
 
 def _get_llm(temperature: float = 0.7):
     return AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature)
+
+def _get_llm_predictor(llm) -> LLMPredictor:
+    return LLMPredictor(llm=llm,)
 
 """
 
