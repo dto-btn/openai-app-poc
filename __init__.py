@@ -28,6 +28,9 @@ from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
+from langchain.chains.conversation.memory import ConversationBufferMemory
+from llama_index.langchain_helpers.agents import LlamaToolkit, create_llama_chat_agent, IndexToolConfig, create_llama_agent
+
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 
@@ -55,6 +58,8 @@ openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
+memory = ConversationBufferMemory(memory_key="chat_history")
+
 @app.route("/health", methods=["GET"])
 def health(): 
     return jsonify({"msg":"Healthy"})
@@ -71,8 +76,6 @@ def query():
     index = ["unstructureddocs-all"] # default ..
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
 
-    chat_history = ""
-
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
     else:
@@ -80,9 +83,6 @@ def query():
 
     if "index" in body:
         index = request.json["index"]
-
-    if "chat_history" in body:
-        chat_history = request.json["chat_history"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -101,42 +101,51 @@ def query():
             lang = "fr"
 
     service_context = _get_service_context(temperature)
-    index = _get_index(service_context=service_context, storage_name=index[0])
 
-    retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
-    # configure retriever
-    # retriever = VectorIndexRetriever(
-    #     index=index, 
-    #     similarity_top_k=2,
-    # )
 
-    # configure response synthesizer
-    response_synthesizer = ResponseSynthesizer.from_args(
-        node_postprocessors=[
-            SimilarityPostprocessor(similarity_cutoff=0.7)
-        ],
+    index_configs = []
+    for name in index:
+        ind = _get_index(service_context=service_context, storage_name=name)
+        retriever = ind.as_retriever(retriever_mode="embedding", similarity_top_k=k)
+        # configure response synthesizer
+        response_synthesizer = ResponseSynthesizer.from_args(
+            node_postprocessors=[
+                SimilarityPostprocessor(similarity_cutoff=0.7)
+            ],
+        )
+        # assemble query engine
+        query_engine = RetrieverQueryEngine.from_args(
+            retriever=retriever,
+            response_synthesizer=response_synthesizer,
+            service_context=service_context,
+            #text_qa_template=_get_prompt_template(lang),
+            #refine_template=_get_refined_prompt(lang),
+            response_mode="tree_summarize",
+            verbose=True
+        )
+        index_configs.append(IndexToolConfig(query_engine=query_engine, 
+                                            tool_kwargs={"return_direct": True},
+                                            name=f"Vector Index: {name}",
+                                            description="Various information about Shared Service Canada intranet and departemental information",))
+
+    toolkit = LlamaToolkit(index_configs=index_configs)
+
+
+    llm = _get_llm(temperature)
+    agent_chain = create_llama_chat_agent(
+        toolkit,
+        llm,
+        memory=memory,
+        verbose=True
     )
-
-    # assemble query engine
-    query_engine = RetrieverQueryEngine.from_args(
-        retriever=retriever,
-        response_synthesizer=response_synthesizer,
-        service_context=service_context,
-        text_qa_template=_get_prompt_template(lang, chat_history),
-        #refine_template=_get_refined_prompt(lang),
-        response_mode="tree_summarize"
-    )
-
+    response = agent_chain.run(input=query)
     response = query_engine.query(query)
-    metadata = _response_metadata(response, pretty)
-
-    chat_history = _build_chat_history(chat_history, query, str(response), lang)
+    #metadata = _response_metadata(response, pretty)
 
     r = {
             'query':query,
             'answer':str(response),
-            'metadata': metadata,
-            'chat_history': chat_history
+            'metadata': {}
         }
 
     if debug:
@@ -167,7 +176,7 @@ def build_index():
     #filename_fn = lambda filename: {'filename': filename}
    
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data(split_documents=False)
 
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
@@ -211,7 +220,7 @@ def _get_index(service_context: ServiceContext, storage_name: str, storage_locat
     else:
         return None
 
-def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
+def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
     # Define prompt helper
     max_input_size = 4096
     num_output = 256 #hard limit
@@ -219,13 +228,13 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     max_chunk_overlap = 20 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = AzureChatOpenAI(deployment_name=deployment_name, 
-                            temperature=temperature)
-    print(llm)
+    llm = _get_llm(temperature)
+
+    logging.info(llm)
     # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
     llm_predictor = LLMPredictor(llm=llm,)
 
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
@@ -234,9 +243,10 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
             ), 
             embed_batch_size=1)
 
-    llama_logger = LlamaLogger()
+    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm)
 
-    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, llama_logger=llama_logger)
+def _get_llm(temperature: float = 0.7):
+    return AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature)
 
 """
 
@@ -249,13 +259,11 @@ SEE:
     * https://github.com/jerryjliu/llama_index/issues/1335
 
 """
-def _get_prompt_template(lang: str, chat_history: str):
+def _get_prompt_template(lang: str):
 
     if lang == "fr":
         QA_PROMPT_TMPL = (
             "Vous êtes un assistant robot de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
-            "---------------------\n"
-            f"{chat_history}\n"
             "\n---------------------\n"
             "{context_str}"
             "\n---------------------\n"
@@ -264,8 +272,6 @@ def _get_prompt_template(lang: str, chat_history: str):
     else:
         QA_PROMPT_TMPL = (
             "You are a Shared Services Canada (SSC) robot assistant. We have provided context information below.\n"
-            "---------------------\n"
-            f"{chat_history}\n"
             "\n---------------------\n"
             "{context_str}"
             "\n---------------------\n"
@@ -370,16 +376,3 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
         metadata = simple
 
     return metadata
-
-'''
-Builds the chat history to be passed back and forth to the chat prompt.
-'''
-def _build_chat_history(chat_history: str, query: str, response: str, lang: str) -> str:
-    if chat_history == "":
-        chat_history = "Here is the conversation history:\n"
-        if lang == "fr":
-            chat_history = "Voici un historique de la conversation:\n"
-    if lang == "fr":
-        return chat_history + f"L'humain a demandé: {query}\n" + f"Le robot a répondu: {response}\n"
-    else:
-        return chat_history + f"Human asked: {query}\n" + f"Robot responded: {response}\n"
