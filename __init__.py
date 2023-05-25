@@ -69,7 +69,7 @@ openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
 memory = ConversationBufferMemory(memory_key="chat_history")
 
-_default_index_name = "unstructureddocs-all"
+_default_index_name = "all"
 _default_graph_root_id = "366b0126-9516-4414-a4de-07a5011d0652"
 _default_graph_name = "root"
 _index_summaries = {_default_index_name: {'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
@@ -89,8 +89,7 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    graph_root_id = _default_graph_root_id # default ..
-    graph_name = _default_graph_name # default
+    index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
 
     if "query" not in body:
@@ -99,7 +98,7 @@ def query():
         query = request.json["query"]
 
     if "index" in body:
-        index = request.json["index"]
+        index_name = request.json["index"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -118,82 +117,46 @@ def query():
             lang = "fr"
 
     service_context = _get_service_context(temperature)
+    index = _get_index(service_context=service_context, storage_name=index_name)
+    llm = _get_llm(temperature)
+    llm_predictor = _get_llm_predictor(llm)
 
-    graph = load_graph_from_storage(
-        root_id=graph_root_id, 
-        service_context=service_context,
-        storage_context=StorageContext.from_defaults(persist_dir=os.path.join(DEFAULT_PERSIST_DIR, graph_name))
-    )
-
-    llm = _get_llm(0)
-    decompose_transform = DecomposeQueryTransform(
-        _get_llm_predictor(llm), verbose=True
-    )
-
-    index_set = {}
-    for name in graph.all_indices:
-        if name != graph_root_id: #do not consider the graph root id index
-            index_set[name] = _get_index(service_context=service_context, storage_name=name)
-
-    print(len(graph.all_indices))
-
-    custom_query_engines = {}
-    for index in index_set.values():
-        query_engine = index.as_query_engine()
-        query_engine = TransformQueryEngine(
-            query_engine,
-            query_transform=decompose_transform,
-            transform_extra_info={'index_summary': index.index_struct.summary},
-        )
-        custom_query_engines[index.index_id] = query_engine
+    retriever = index.as_retriever(retriever_mode="embedding", 
+                                   similarity_top_k=k
     
-    custom_query_engines[graph.root_id] = graph.root_index.as_query_engine(
-        response_mode='tree_summarize',
-        verbose=True,
+    )
+    # configure response synthesizer
+    response_synthesizer = ResponseSynthesizer.from_args(
+        node_postprocessors=[
+            SimilarityPostprocessor(similarity_cutoff=temperature)
+        ],
     )
 
-    # construct query engine
-    graph_query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
-
-    index_configs = []
-    for index in index_set.values():
-        query_engine = index.as_query_engine(
-            similarity_top_k=k
-        )
-        
-        '''retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
-        # configure response synthesizer
-        response_synthesizer = ResponseSynthesizer.from_args(
-            node_postprocessors=[
-                SimilarityPostprocessor(similarity_cutoff=0.7)
-            ],
-        )
-        # assemble query engine
-        query_engine = RetrieverQueryEngine.from_args(
-            retriever=retriever,
-            response_synthesizer=response_synthesizer,
-            service_context=service_context,
-            text_qa_template=_get_prompt_template(lang),
-            refine_template=_get_refined_prompt(lang),
-            response_mode="tree_summarize",
-            verbose=True
-        )'''
-        tool_config = IndexToolConfig(query_engine=query_engine, 
-                                            name=f"Vector Index: {name}",
-                                            description="Various information about Shared Service Canada intranet and departemental information",
-                                            tool_kwargs={"return_direct": True, "return_sources": True})
-        index_configs.append(tool_config)
-        
-    # graph config
-    graph_config = IndexToolConfig(
-        query_engine=graph_query_engine,
-            name=f"Graph Index",
-            description="useful for when you want to answer queries that require analyzing multiple SEC 10-K documents for Uber.",
-            tool_kwargs={"return_direct": True, "return_sources": True},
-            return_sources=True
+    # assemble query engine
+    query_engine = RetrieverQueryEngine.from_args(
+        retriever=retriever,
+        response_synthesizer=response_synthesizer,
+        service_context=service_context,
+        #text_qa_template=_get_prompt_template(lang),
+        #refine_template=_get_refined_prompt(lang),
+        response_mode="tree_summarize",
+        verbose=True
     )
 
-    toolkit = LlamaToolkit(index_configs=index_configs, graph_config=graph_config)
+    '''decompose_transform = DecomposeQueryTransform(
+        llm_predictor, verbose=True
+    )
+
+    query_engine = TransformQueryEngine(query_engine, 
+                                        query_transform=decompose_transform, 
+                                        transform_extra_info={'index_summary': ":".join([t for t in _index_summaries[index_name][lang]])})'''
+
+    index_configs = [IndexToolConfig(query_engine=query_engine, 
+                                        name=f"SSC unstructured documents",
+                                        description=":".join([t for t in _index_summaries[index_name][lang]]),
+                                        tool_kwargs={"return_direct": True, "return_sources": True})]
+
+    toolkit = LlamaToolkit(index_configs=index_configs)
 
     agent_chain = create_llama_chat_agent(
         toolkit,
@@ -203,14 +166,18 @@ def query():
         verbose=True
     )
     response = agent_chain.run(input=query)
-    #response_dict = ast.literal_eval(response)
-    #response = query_engine.query(query)
-    #metadata = _response_metadata(response, pretty)
+    try:
+        metadata = ast.literal_eval(response)
+        #metadata = _response_metadata(response, pretty)
+        response = metadata['answer']
+    except:
+        logging.info("Unable to format response from agent will use default str.")
+        metadata = {}
 
     r = {
-            'query':query,
+            'query': query,
             'answer': response,
-            'metadata': response
+            'metadata': metadata
         }
 
     if debug:
@@ -364,19 +331,21 @@ def _get_prompt_template(lang: str):
 
     if lang == "fr":
         QA_PROMPT_TMPL = (
-            "Vous êtes un assistant robot de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
+            "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
             "\n---------------------\n"
             "{context_str}"
             "\n---------------------\n"
             "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
+            "Si vous ne conaissez pas la réponse, dites que vous ne la conaissez pas tout simplement. Use the following tool: SSC unstructured documents\n"
         )
     else:
         QA_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) robot assistant. We have provided context information below.\n"
+            "You are a Shared Services Canada (SSC) assistant. We have provided context information below.\n"
             "\n---------------------\n"
             "{context_str}"
             "\n---------------------\n"
             "Given this information, please answer the question: {query_str}\n"
+            "If you do not know the answer to the question, simply say so. Use the following tool: SSC unstructured documents\n"
     )
 
     return QuestionAnswerPrompt(QA_PROMPT_TMPL)
