@@ -119,27 +119,26 @@ def query():
     service_context = _get_service_context(temperature)
     index = _get_index(service_context=service_context, storage_name=index_name)
     llm = _get_llm(temperature)
-    llm_predictor = _get_llm_predictor(llm)
 
-    retriever = index.as_retriever(retriever_mode="embedding", 
+    retriever = index.as_retriever(retriever_mode="default", 
                                    similarity_top_k=k
     
     )
     # configure response synthesizer
     response_synthesizer = ResponseSynthesizer.from_args(
         node_postprocessors=[
-            SimilarityPostprocessor(similarity_cutoff=temperature)
+            SimilarityPostprocessor(similarity_cutoff=0.7)
         ],
     )
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
-        response_synthesizer=response_synthesizer,
+        #response_synthesizer=response_synthesizer,
         service_context=service_context,
-        #text_qa_template=_get_prompt_template(lang),
+        text_qa_template=_get_prompt_template(lang),
         #refine_template=_get_refined_prompt(lang),
-        response_mode="tree_summarize",
+        response_mode="refine",
         verbose=True
     )
 
