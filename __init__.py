@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from typing import List
+import ast
 
 import openai
 from azure.identity import DefaultAzureCredential
@@ -17,10 +18,12 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.prompts.chat import (AIMessagePromptTemplate,
                                     ChatPromptTemplate,
                                     HumanMessagePromptTemplate)
+from langchain.agents import AgentType
 from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
                          PromptHelper, QuestionAnswerPrompt,
                          ResponseSynthesizer, ServiceContext, StorageContext,
-                         download_loader, load_index_from_storage)
+                         download_loader, load_index_from_storage, load_graph_from_storage)
+
 from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
 from llama_index.indices.query.query_transform.base import \
@@ -66,6 +69,13 @@ openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
 memory = ConversationBufferMemory(memory_key="chat_history")
 
+_default_index_name = "unstructureddocs-all"
+_default_graph_root_id = "366b0126-9516-4414-a4de-07a5011d0652"
+_default_graph_name = "root"
+_index_summaries = {_default_index_name: {'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
+                                          'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
+}
+
 @app.route("/health", methods=["GET"])
 def health(): 
     return jsonify({"msg":"Healthy"})
@@ -79,7 +89,8 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    index = ["unstructureddocs-all"] # default ..
+    graph_root_id = _default_graph_root_id # default ..
+    graph_name = _default_graph_name # default
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
 
     if "query" not in body:
@@ -108,24 +119,23 @@ def query():
 
     service_context = _get_service_context(temperature)
 
-    # define a list index over the vector indices
-    # allows us to synthesize information across each index
-    index_set = {}
-    for name in index:
-        index_set[name] = _get_index(service_context=service_context, storage_name=name)
-
-    index_summaries = [f"Vector index ({name}) that contains internal Shared Services Canada (SSC) information" for name in index]
-    graph = ComposableGraph.from_indices(
-        GPTListIndex,
-        [index_set[name] for name in index], 
-        index_summaries=index_summaries,
+    graph = load_graph_from_storage(
+        root_id=graph_root_id, 
         service_context=service_context,
+        storage_context=StorageContext.from_defaults(persist_dir=os.path.join(DEFAULT_PERSIST_DIR, graph_name))
     )
 
-    llm = _get_llm(temperature)
+    llm = _get_llm(0)
     decompose_transform = DecomposeQueryTransform(
         _get_llm_predictor(llm), verbose=True
     )
+
+    index_set = {}
+    for name in graph.all_indices:
+        if name != graph_root_id: #do not consider the graph root id index
+            index_set[name] = _get_index(service_context=service_context, storage_name=name)
+
+    print(len(graph.all_indices))
 
     custom_query_engines = {}
     for index in index_set.values():
@@ -147,7 +157,11 @@ def query():
 
     index_configs = []
     for index in index_set.values():
-        retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
+        query_engine = index.as_query_engine(
+            similarity_top_k=k
+        )
+        
+        '''retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
         # configure response synthesizer
         response_synthesizer = ResponseSynthesizer.from_args(
             node_postprocessors=[
@@ -159,11 +173,11 @@ def query():
             retriever=retriever,
             response_synthesizer=response_synthesizer,
             service_context=service_context,
-            #text_qa_template=_get_prompt_template(lang),
-            #refine_template=_get_refined_prompt(lang),
+            text_qa_template=_get_prompt_template(lang),
+            refine_template=_get_refined_prompt(lang),
             response_mode="tree_summarize",
             verbose=True
-        )
+        )'''
         tool_config = IndexToolConfig(query_engine=query_engine, 
                                             name=f"Vector Index: {name}",
                                             description="Various information about Shared Service Canada intranet and departemental information",
@@ -184,17 +198,19 @@ def query():
     agent_chain = create_llama_chat_agent(
         toolkit,
         llm,
+        #AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
         memory=memory,
         verbose=True
     )
     response = agent_chain.run(input=query)
+    #response_dict = ast.literal_eval(response)
     #response = query_engine.query(query)
     #metadata = _response_metadata(response, pretty)
 
     r = {
             'query':query,
-            'answer':str(response),
-            'metadata': {}
+            'answer': response,
+            'metadata': response
         }
 
     if debug:
@@ -225,7 +241,7 @@ def build_index():
     #filename_fn = lambda filename: {'filename': filename}
    
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data(split_documents=False)
+    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
 
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
@@ -234,6 +250,47 @@ def build_index():
 
     #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
     return jsonify({'msg': "index loaded successfully"})
+
+@app.route("/buildgraph", methods=["POST"])
+def build_graph():
+    if "indices" not in request.json:
+        return jsonify({"error":"Request body must contain name(s) of indicies to create the graph from"}), 400
+    if "graph_name" not in request.json:
+        return jsonify({"error":"Request body must contain name of the graph to create"}), 400
+    
+    indices = request.json['indices']
+    graph_name = request.json['graph_name']
+
+    service_context = _get_service_context()
+    storage_context = StorageContext.from_defaults()
+
+    # define a list index over the vector indices
+    # allows us to synthesize information across each index
+    index_set = {}
+    for name in indices:
+        index_set[name] = _get_index(service_context=service_context, storage_name=name)
+
+    index_summaries = []
+    for name in indices:
+        if name in _index_summaries:
+            summary = ":".join([t for t in _index_summaries[name]['en']]) + "\n" + ":".join([t for t in _index_summaries[name]['fr']])
+            print(summary)
+            index_summaries.append(summary)
+        else:
+            index_summaries.append(f"Shared Services Canada (SSC) information Vector index that contains information about :{name}")
+    
+    graph = ComposableGraph.from_indices(
+        GPTListIndex,
+        [index_set[name] for name in indices], 
+        index_summaries=index_summaries,
+        service_context=service_context,
+        storage_context=storage_context
+    )
+    root_id = graph.root_id
+
+    storage_context.persist(persist_dir=os.path.join(DEFAULT_PERSIST_DIR, graph_name))
+
+    return jsonify({'msg': f"graph created successfully with root_id: {root_id}"})
 
 """
 
@@ -258,16 +315,8 @@ Loads a Vector Index from the local filesystem
 
 """    
 def _get_index(service_context: ServiceContext, storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
-    # check if index file is present on fs ortherwise build it ...
-    loc = os.path.join(storage_location, storage_name)
-    if os.path.exists(loc):
-        try:
-            storage_context = StorageContext.from_defaults(persist_dir=loc)
-            return load_index_from_storage(service_context=service_context, storage_context=storage_context)
-        except:
-            return None
-    else:
-        return None
+    return load_index_from_storage(service_context=service_context, 
+                                   storage_context=StorageContext.from_defaults(persist_dir=os.path.join(storage_location, storage_name)))
 
 def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
     # Define prompt helper
@@ -402,6 +451,7 @@ def _filename_fn(filename: str) -> dict:
     if filename.endswith(".txt") and source == "sscplus":
         f = ''.join(filename.split("container/sscplus/", 1)).replace(".txt", "")
         url = f"https://plus.ssc-spc.gc.ca/{f}"
+        fn = f
 
     return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
 
