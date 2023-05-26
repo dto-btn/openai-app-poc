@@ -15,30 +15,21 @@ from flask import Flask, jsonify, request
 from langchain.chains.conversation.memory import ConversationBufferMemory
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.prompts.chat import (AIMessagePromptTemplate,
-                                    ChatPromptTemplate,
-                                    HumanMessagePromptTemplate)
-from langchain.agents import AgentType
+
 from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
-                         PromptHelper, QuestionAnswerPrompt,
+                         PromptHelper,
                          ResponseSynthesizer, ServiceContext, StorageContext,
-                         download_loader, load_index_from_storage, load_graph_from_storage)
+                         download_loader, load_index_from_storage, QueryBundle)
 
 from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
-from llama_index.indices.query.query_transform.base import \
-    DecomposeQueryTransform
-from llama_index.langchain_helpers.agents import (IndexToolConfig,
-                                                  LlamaToolkit,
-                                                  create_llama_chat_agent)
+
 from llama_index.llm_predictor import LLMPredictor
-from llama_index.logger import LlamaLogger
-from llama_index.prompts.prompts import RefinePrompt
 from llama_index.query_engine import RetrieverQueryEngine
-from llama_index.query_engine.transform_query_engine import \
-    TransformQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
+
+from .prompts import (get_chat_prompt_template, get_refined_prompt) 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -67,14 +58,7 @@ openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
-memory = ConversationBufferMemory(memory_key="chat_history")
-
 _default_index_name = "all"
-_default_graph_root_id = "366b0126-9516-4414-a4de-07a5011d0652"
-_default_graph_name = "root"
-_index_summaries = {_default_index_name: {'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
-                                          'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
-}
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -91,6 +75,7 @@ def query():
     lang = "en"
     index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
+    history = {'inputs': [], 'outputs': []}
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -115,15 +100,27 @@ def query():
     if "lang" in body:
         if str(request.json["lang"]) == "fr":
             lang = "fr"
+    
+    if "chat_history" in body:
+        # try and conver the chat history into a map
+        try:
+            history = ast.literal.eval(request.json["chat_history"])
+            # validate we have an input and output key
+            if 'inputs' not in history or 'outputs' not in history:
+                raise Exception("Unable to properly parse chat_history")
+        except:
+            logging.error("Unable to convert chat_history to a proper map that contains input and outputs..")
+            history = {'inputs': [], 'outputs': []}
 
     service_context = _get_service_context(temperature)
-    index = _get_index(service_context=service_context, storage_name=index_name)
-    llm = _get_llm(temperature)
-
-    retriever = index.as_retriever(retriever_mode="default", 
-                                   similarity_top_k=k
     
+    index = _get_index(service_context=service_context, storage_name=index_name)
+    
+    retriever = index.as_retriever(
+        retriever_mode="default", 
+        similarity_top_k=k
     )
+
     # configure response synthesizer
     response_synthesizer = ResponseSynthesizer.from_args(
         node_postprocessors=[
@@ -134,49 +131,28 @@ def query():
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
-        #response_synthesizer=response_synthesizer,
+        response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=_get_prompt_template(lang),
-        #refine_template=_get_refined_prompt(lang),
+        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history)),
+        refine_template=get_refined_prompt(lang),
         response_mode="refine",
         verbose=True
     )
 
-    '''decompose_transform = DecomposeQueryTransform(
-        llm_predictor, verbose=True
+    #build QueryBundle
+    query_bundle = QueryBundle(
+        query,
+        custom_embedding_strs=_history_as_list(history)
     )
-
-    query_engine = TransformQueryEngine(query_engine, 
-                                        query_transform=decompose_transform, 
-                                        transform_extra_info={'index_summary': ":".join([t for t in _index_summaries[index_name][lang]])})'''
-
-    index_configs = [IndexToolConfig(query_engine=query_engine, 
-                                        name=f"SSC unstructured documents",
-                                        description=":".join([t for t in _index_summaries[index_name][lang]]),
-                                        tool_kwargs={"return_direct": True, "return_sources": True})]
-
-    toolkit = LlamaToolkit(index_configs=index_configs)
-
-    agent_chain = create_llama_chat_agent(
-        toolkit,
-        llm,
-        #AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
-        memory=memory,
-        verbose=True
-    )
-    response = agent_chain.run(input=query)
-    try:
-        metadata = ast.literal_eval(response)
-        #metadata = _response_metadata(response, pretty)
-        response = metadata['answer']
-    except:
-        logging.info("Unable to format response from agent will use default str.")
-        metadata = {}
+    response = query_engine.query(query_bundle)
+    metadata = _response_metadata(response, pretty)
+    history = _update_chat_history(history, query, str(response), lang)
 
     r = {
             'query': query,
-            'answer': response,
-            'metadata': metadata
+            'answer': str(response),
+            'metadata': metadata,
+            'chat_history': history
         }
 
     if debug:
@@ -295,7 +271,6 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
     llm = _get_llm(temperature)
 
     logging.info(llm)
-    # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
     llm_predictor = _get_llm_predictor(llm)
 
     prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
@@ -315,77 +290,6 @@ def _get_llm(temperature: float = 0.7):
 def _get_llm_predictor(llm) -> LLMPredictor:
     return LLMPredictor(llm=llm,)
 
-"""
-
-NOTE: for refined prompt templates for bilingual 
-we also have to modify the refined prompt templates, 
-which generally will change the original french answer to an english one
-
-SEE: 
-    * https://github.com/jerryjliu/llama_index/blob/main/llama_index/prompts/chat_prompts.py and 
-    * https://github.com/jerryjliu/llama_index/issues/1335
-
-"""
-def _get_prompt_template(lang: str):
-
-    if lang == "fr":
-        QA_PROMPT_TMPL = (
-            "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
-            "Si vous ne conaissez pas la réponse, dites que vous ne la conaissez pas tout simplement. Use the following tool: SSC unstructured documents\n"
-        )
-    else:
-        QA_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) assistant. We have provided context information below.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Given this information, please answer the question: {query_str}\n"
-            "If you do not know the answer to the question, simply say so. Use the following tool: SSC unstructured documents\n"
-    )
-
-    return QuestionAnswerPrompt(QA_PROMPT_TMPL)
-
-def _get_refined_prompt(lang: str):
-    # Refine Prompt
-    if lang == "fr":
-        CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "J'ai plus de contexte ci-dessous qui peut être utilisé"
-                "(uniquement si nécessaire) pour mettre à jour votre réponse précédente.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Compte tenu du nouveau contexte, mettre à jour la réponse précédente pour mieux"
-                "répondez à ma question précédente."
-                "Si la réponse précédente reste la même, répétez-la textuellement."
-                "Ne référencez jamais directement le nouveau contexte ou ma requête précédente.",
-            ),
-        ]
-    else:
-        CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "I have more context below which can be used "
-                "(only if needed) to update your previous answer.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Given the new context, update the previous answer to better "
-                "answer my previous query."
-                "If the previous answer remains the same, repeat it verbatim. "
-                "Never reference the new context or my previous query directly.",
-            ),
-        ]
-
-    CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
-    return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
 
 """
 Metadata building for the index nodes, stored in extra_info at response time.
@@ -446,3 +350,39 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
         metadata = simple
 
     return metadata
+
+def _update_chat_history(history: dict, query: str, response: str, lang: str) -> str:
+    ai_prefix = "AI: "
+    human_prefix = "Human: "
+    if lang == "fr":
+        ai_prefix = "IA: "
+        human_prefix = "Humain: "
+    
+    history['inputs'].append(human_prefix + query)
+    history['outputs'].append(ai_prefix + response)
+
+def _history_as_str(history: dict) -> str: 
+    inputs = history['inputs']
+    outputs = history['outputs']
+
+    history_str = ""
+
+    for index, _ in enumerate(inputs):
+        history_str += inputs[index] + "\n"
+        history_str += outputs[index] + "\n"
+
+    return history_str
+
+def _history_as_list(history: dict) -> List[str]:    
+    inputs = history['inputs']
+    outputs = history['outputs']
+
+    history_list = []
+
+    for index, _ in enumerate(inputs):
+        print([index] + "\n" + outputs[index] + "\n")
+        history_list.append([index] + "\n" + outputs[index] + "\n")
+
+    if not history_list:
+        return None
+    return history_list
