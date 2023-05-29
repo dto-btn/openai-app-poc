@@ -3,6 +3,9 @@ import os
 import sys
 import time
 from typing import List
+import ast
+import base64
+import json
 
 import openai
 from azure.identity import DefaultAzureCredential
@@ -11,22 +14,24 @@ from azure.storage.blob import BlobServiceClient
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from langchain.chains.conversation.memory import ConversationBufferMemory
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.prompts.chat import (AIMessagePromptTemplate,
-                                    ChatPromptTemplate,
-                                    HumanMessagePromptTemplate)
-from llama_index import (GPTVectorStoreIndex, LangchainEmbedding,
-                         PromptHelper, QuestionAnswerPrompt,
+
+from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
+                         PromptHelper,
                          ResponseSynthesizer, ServiceContext, StorageContext,
-                         download_loader, load_index_from_storage)
+                         download_loader, load_index_from_storage, QueryBundle)
+
+from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
+
 from llama_index.llm_predictor import LLMPredictor
-from llama_index.logger import LlamaLogger
-from llama_index.prompts.prompts import RefinePrompt
 from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
+
+from .prompts import (get_chat_prompt_template, get_refined_prompt) 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -55,6 +60,11 @@ openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
+# 5 seemed to much at the moment so I reduced it, it might be better not to use embeddings.
+_max_history = 3
+
+_default_index_name = "all"
+
 @app.route("/health", methods=["GET"])
 def health(): 
     return jsonify({"msg":"Healthy"})
@@ -68,8 +78,9 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    index = ["unstructureddocs-all"] # default ..
+    index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
+    history = {'inputs': [], 'outputs': []}
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -77,7 +88,7 @@ def query():
         query = request.json["query"]
 
     if "index" in body:
-        index = request.json["index"]
+        index_name = request.json["index"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -94,16 +105,28 @@ def query():
     if "lang" in body:
         if str(request.json["lang"]) == "fr":
             lang = "fr"
+    
+    if "chat_history" in body:
+        # try and conver the chat history into a map
+        try:
+            encoded = request.json["chat_history"]
+            decoded = base64.b64decode(encoded)
+            history = json.loads(decoded)
+            # validate we have an input and output key
+            if 'inputs' not in history or 'outputs' not in history:
+                raise Exception("Unable to properly parse chat_history")
+        except:
+            logging.error("Unable to convert chat_history to a proper map that contains input and outputs..")
+            history = {'inputs': [], 'outputs': []}
 
     service_context = _get_service_context(temperature)
-    index = _get_index(service_context=service_context, storage_name=index[0])
-
-    retriever = index.as_retriever(retriever_mode="embedding", similarity_top_k=k)
-    # configure retriever
-    # retriever = VectorIndexRetriever(
-    #     index=index, 
-    #     similarity_top_k=2,
-    # )
+    
+    index = _get_index(service_context=service_context, storage_name=index_name)
+    
+    retriever = index.as_retriever(
+        retriever_mode="default", 
+        similarity_top_k=k
+    )
 
     # configure response synthesizer
     response_synthesizer = ResponseSynthesizer.from_args(
@@ -117,17 +140,29 @@ def query():
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=_get_prompt_template(lang),
-        refine_template=_get_refined_prompt(lang), 
+        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history)),
+        refine_template=get_refined_prompt(lang),
+        response_mode="tree_summarize",
+        verbose=True
     )
 
-    response = query_engine.query(query)
+    #build QueryBundle
+    query_bundle = QueryBundle(
+        query,
+        #custom_embedding_strs=_get_history_embeddings(history)
+    )
+    response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
 
+    history = _update_chat_history(history, query, str(response), lang)
+    history_bytes = json.dumps(history).encode('utf-8')
+    history_enc = base64.b64encode(history_bytes)
+
     r = {
-            'query':query,
-            'answer':str(response),
-            'metadata': metadata
+            'query': query,
+            'answer': str(response),
+            'metadata': metadata,
+            'chat_history': str(history_enc, 'utf-8')
         }
 
     if debug:
@@ -168,6 +203,52 @@ def build_index():
     #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
     return jsonify({'msg': "index loaded successfully"})
 
+@app.route("/buildgraph", methods=["POST"])
+def build_graph():
+    index_summaries = {
+        _default_index_name: {
+            'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
+            'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
+    }
+    if "indices" not in request.json:
+        return jsonify({"error":"Request body must contain name(s) of indicies to create the graph from"}), 400
+    if "graph_name" not in request.json:
+        return jsonify({"error":"Request body must contain name of the graph to create"}), 400
+    
+    indices = request.json['indices']
+    graph_name = request.json['graph_name']
+
+    service_context = _get_service_context()
+    storage_context = StorageContext.from_defaults()
+
+    # define a list index over the vector indices
+    # allows us to synthesize information across each index
+    index_set = {}
+    for name in indices:
+        index_set[name] = _get_index(service_context=service_context, storage_name=name)
+
+    index_summaries = []
+    for name in indices:
+        if name in index_summaries:
+            summary = ":".join([t for t in index_summaries[name]['en']]) + "\n" + ":".join([t for t in index_summaries[name]['fr']])
+            print(summary)
+            index_summaries.append(summary)
+        else:
+            index_summaries.append(f"Shared Services Canada (SSC) information Vector index that contains information about :{name}")
+    
+    graph = ComposableGraph.from_indices(
+        GPTListIndex,
+        [index_set[name] for name in indices], 
+        index_summaries=index_summaries,
+        service_context=service_context,
+        storage_context=storage_context
+    )
+    root_id = graph.root_id
+
+    storage_context.persist(persist_dir=os.path.join(DEFAULT_PERSIST_DIR, graph_name))
+
+    return jsonify({'msg': f"graph created successfully with root_id: {root_id}"})
+
 """
 
 Download files from an Azure Blob storage to the local FS
@@ -191,18 +272,10 @@ Loads a Vector Index from the local filesystem
 
 """    
 def _get_index(service_context: ServiceContext, storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
-    # check if index file is present on fs ortherwise build it ...
-    loc = os.path.join(storage_location, storage_name)
-    if os.path.exists(loc):
-        try:
-            storage_context = StorageContext.from_defaults(persist_dir=loc)
-            return load_index_from_storage(service_context=service_context, storage_context=storage_context)
-        except:
-            return None
-    else:
-        return None
+    return load_index_from_storage(service_context=service_context, 
+                                   storage_context=StorageContext.from_defaults(persist_dir=os.path.join(storage_location, storage_name)))
 
-def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
+def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
     # Define prompt helper
     max_input_size = 4096
     num_output = 256 #hard limit
@@ -210,13 +283,12 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     max_chunk_overlap = 20 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = AzureChatOpenAI(deployment_name=deployment_name, 
-                            temperature=temperature)
-    print(llm)
-    # https://gist.github.com/csiebler/32f371470c4e717db84a61874e951fa4
-    llm_predictor = LLMPredictor(llm=llm,)
+    llm = _get_llm(temperature)
 
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+    logging.info(llm)
+    llm_predictor = _get_llm_predictor(llm)
+
+    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
@@ -225,79 +297,14 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
             ), 
             embed_batch_size=1)
 
-    llama_logger = LlamaLogger()
+    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm)
 
-    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, llama_logger=llama_logger)
+def _get_llm(temperature: float = 0.7):
+    return AzureChatOpenAI(deployment_name=deployment_name, temperature=temperature)
 
-"""
+def _get_llm_predictor(llm) -> LLMPredictor:
+    return LLMPredictor(llm=llm,)
 
-NOTE: for refined prompt templates for bilingual 
-we also have to modify the refined prompt templates, 
-which generally will change the original french answer to an english one
-
-SEE: 
-    * https://github.com/jerryjliu/llama_index/blob/main/llama_index/prompts/chat_prompts.py and 
-    * https://github.com/jerryjliu/llama_index/issues/1335
-
-"""
-def _get_prompt_template(lang: str):
-
-    if lang == "fr":
-        QA_PROMPT_TMPL = (
-            "Vous êtes un assistant de Services partagés Canada (SPC). Nous avons fourni des informations contextuelles ci-dessous. \n"
-            "---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
-        )
-    else:
-        QA_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) assistant. We have provided context information below. \n"
-            "---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Given this information, please answer the question: {query_str}\n"
-    )
-
-    return QuestionAnswerPrompt(QA_PROMPT_TMPL)
-
-def _get_refined_prompt(lang: str):
-    # Refine Prompt
-    if lang == "fr":
-        CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "J'ai plus de contexte ci-dessous qui peut être utilisé"
-                "(uniquement si nécessaire) pour mettre à jour votre réponse précédente.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Compte tenu du nouveau contexte, mettre à jour la réponse précédente pour mieux"
-                "répondez à ma question précédente."
-                "Si la réponse précédente reste la même, répétez-la textuellement."
-                "Ne référencez jamais directement le nouveau contexte ou ma requête précédente.",
-            ),
-        ]
-    else:
-        CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "I have more context below which can be used "
-                "(only if needed) to update your previous answer.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Given the new context, update the previous answer to better "
-                "answer my previous query."
-                "If the previous answer remains the same, repeat it verbatim. "
-                "Never reference the new context or my previous query directly.",
-            ),
-        ]
-
-    CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
-    return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
 
 """
 Metadata building for the index nodes, stored in extra_info at response time.
@@ -331,6 +338,7 @@ def _filename_fn(filename: str) -> dict:
     if filename.endswith(".txt") and source == "sscplus":
         f = ''.join(filename.split("container/sscplus/", 1)).replace(".txt", "")
         url = f"https://plus.ssc-spc.gc.ca/{f}"
+        fn = f
 
     return {"filename": fn, "lastmodified": lastmod, "url": url, "source": source}
 
@@ -357,3 +365,48 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
         metadata = simple
 
     return metadata
+
+def _update_chat_history(history: dict, query: str, response: str, lang: str) -> dict:
+    ai_prefix = "AI: "
+    human_prefix = "Human: "
+    if lang == "fr":
+        ai_prefix = "IA: "
+        human_prefix = "Humain: "
+
+    while len(history['inputs']) >= _max_history:
+        logging.debug("history is too big, truncating ..")
+        history['inputs'].pop(0)
+        history['outputs'].pop(0)
+         
+    history['inputs'].append(human_prefix + query)
+    history['outputs'].append(ai_prefix + response)
+
+    return history
+
+def _history_as_str(history: dict) -> str: 
+    inputs = history['inputs']
+    outputs = history['outputs']
+
+    history_str = ""
+
+    for index, _ in enumerate(inputs):
+        history_str += inputs[index] + "\n"
+        history_str += outputs[index] + "\n"
+
+    return history_str
+
+'''
+This one just returns a list of the outputs for the embeddings search. 
+Since the question asked by the user might refer to previous "context"
+'''
+def _get_history_embeddings(history: dict) -> List[str]:    
+    outputs = history['outputs']
+
+    history_list = []
+
+    for index, _ in enumerate(outputs):
+        history_list.append(outputs[index] + "\n")
+
+    if not history_list:
+        return None
+    return history_list
