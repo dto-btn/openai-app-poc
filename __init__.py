@@ -4,6 +4,8 @@ import sys
 import time
 from typing import List
 import ast
+import base64
+import json
 
 import openai
 from azure.identity import DefaultAzureCredential
@@ -58,6 +60,9 @@ openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
+# 5 seemed to much at the moment so I reduced it, it might be better not to use embeddings.
+_max_history = 3
+
 _default_index_name = "all"
 
 @app.route("/health", methods=["GET"])
@@ -104,7 +109,9 @@ def query():
     if "chat_history" in body:
         # try and conver the chat history into a map
         try:
-            history = ast.literal.eval(request.json["chat_history"])
+            encoded = request.json["chat_history"]
+            decoded = base64.b64decode(encoded)
+            history = json.loads(decoded)
             # validate we have an input and output key
             if 'inputs' not in history or 'outputs' not in history:
                 raise Exception("Unable to properly parse chat_history")
@@ -135,24 +142,27 @@ def query():
         service_context=service_context,
         text_qa_template=get_chat_prompt_template(lang, _history_as_str(history)),
         refine_template=get_refined_prompt(lang),
-        response_mode="refine",
+        response_mode="tree_summarize",
         verbose=True
     )
 
     #build QueryBundle
     query_bundle = QueryBundle(
         query,
-        custom_embedding_strs=_history_as_list(history)
+        #custom_embedding_strs=_get_history_embeddings(history)
     )
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
+
     history = _update_chat_history(history, query, str(response), lang)
+    history_bytes = json.dumps(history).encode('utf-8')
+    history_enc = base64.b64encode(history_bytes)
 
     r = {
             'query': query,
             'answer': str(response),
             'metadata': metadata,
-            'chat_history': history
+            'chat_history': str(history_enc, 'utf-8')
         }
 
     if debug:
@@ -195,6 +205,11 @@ def build_index():
 
 @app.route("/buildgraph", methods=["POST"])
 def build_graph():
+    index_summaries = {
+        _default_index_name: {
+            'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
+            'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
+    }
     if "indices" not in request.json:
         return jsonify({"error":"Request body must contain name(s) of indicies to create the graph from"}), 400
     if "graph_name" not in request.json:
@@ -214,8 +229,8 @@ def build_graph():
 
     index_summaries = []
     for name in indices:
-        if name in _index_summaries:
-            summary = ":".join([t for t in _index_summaries[name]['en']]) + "\n" + ":".join([t for t in _index_summaries[name]['fr']])
+        if name in index_summaries:
+            summary = ":".join([t for t in index_summaries[name]['en']]) + "\n" + ":".join([t for t in index_summaries[name]['fr']])
             print(summary)
             index_summaries.append(summary)
         else:
@@ -351,15 +366,22 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
 
     return metadata
 
-def _update_chat_history(history: dict, query: str, response: str, lang: str) -> str:
+def _update_chat_history(history: dict, query: str, response: str, lang: str) -> dict:
     ai_prefix = "AI: "
     human_prefix = "Human: "
     if lang == "fr":
         ai_prefix = "IA: "
         human_prefix = "Humain: "
-    
+
+    while len(history['inputs']) >= _max_history:
+        logging.debug("history is too big, truncating ..")
+        history['inputs'].pop(0)
+        history['outputs'].pop(0)
+         
     history['inputs'].append(human_prefix + query)
     history['outputs'].append(ai_prefix + response)
+
+    return history
 
 def _history_as_str(history: dict) -> str: 
     inputs = history['inputs']
@@ -373,15 +395,17 @@ def _history_as_str(history: dict) -> str:
 
     return history_str
 
-def _history_as_list(history: dict) -> List[str]:    
-    inputs = history['inputs']
+'''
+This one just returns a list of the outputs for the embeddings search. 
+Since the question asked by the user might refer to previous "context"
+'''
+def _get_history_embeddings(history: dict) -> List[str]:    
     outputs = history['outputs']
 
     history_list = []
 
-    for index, _ in enumerate(inputs):
-        print([index] + "\n" + outputs[index] + "\n")
-        history_list.append([index] + "\n" + outputs[index] + "\n")
+    for index, _ in enumerate(outputs):
+        history_list.append(outputs[index] + "\n")
 
     if not history_list:
         return None
