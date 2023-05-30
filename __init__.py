@@ -60,8 +60,14 @@ openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
-# 5 seemed to much at the moment so I reduced it, it might be better not to use embeddings.
-_max_history = 3
+'''
+Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, seems big enough. 
+
+And we will keep the embedding chat history to a minimum (and we also restrict it to outputs only ..)
+'''
+_max_history = 5
+_max_embeddings_history = 2
+
 
 _default_index_name = "all"
 
@@ -149,8 +155,9 @@ def query():
     #build QueryBundle
     query_bundle = QueryBundle(
         query,
-        #custom_embedding_strs=_get_history_embeddings(history)
+        custom_embedding_strs=_get_history_embeddings(history)
     )
+
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
 
@@ -399,14 +406,14 @@ def _history_as_str(history: dict) -> str:
 This one just returns a list of the outputs for the embeddings search. 
 Since the question asked by the user might refer to previous "context"
 '''
-def _get_history_embeddings(history: dict) -> List[str]:    
+def _get_history_embeddings(history: dict) -> List[str]: 
     outputs = history['outputs']
-
+    if not outputs:
+        return None  
+    
     history_list = []
-
-    for index, _ in enumerate(outputs):
-        history_list.append(outputs[index] + "\n")
-
-    if not history_list:
-        return None
+    # get last n items of that list
+    for i in range(_max_embeddings_history):
+        history_list.append(outputs[-i] + "\n")
+    
     return history_list
