@@ -52,7 +52,7 @@ It is mostlikely because the index wasn't build with the same package version it
 * https://code.visualstudio.com/docs/python/tutorial-flask
 * how `llama_index` [vector indices work](https://gpt-index.readthedocs.io/en/latest/guides/primer/index_guide.html#vector-store-index)
 
-## docker for wsl
+### docker for wsl
 
 I use Windows 10 with WSL 2+. I installed `docker` following [the instructions on their site](https://docs.docker.com/desktop/windows/wsl/).
 
@@ -66,6 +66,11 @@ net localgroup "docker-users" "<your username>" /add
 ```
 You should see something like `Command completed successfully` then logout and then you can start `Docker Desktop`.
 
-## Using Azure Cognitive Search
+### Using Azure Cognitive Search
 
 https://github.com/Azure-Samples/azure-search-openai-demo/blob/main/app/backend/app.py
+
+### building a chatbot
+
+https://gpt-index.readthedocs.io/en/latest/guides/tutorials/building_a_chatbot.html
+
