@@ -1,8 +1,10 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 ENV TZ="Canada/Eastern"
 
 WORKDIR /app
+
+RUN pip install setuptools>=65.5.1 --upgrade
 
 COPY requirements.txt .
 
