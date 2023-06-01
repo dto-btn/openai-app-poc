@@ -74,3 +74,14 @@ https://github.com/Azure-Samples/azure-search-openai-demo/blob/main/app/backend/
 
 https://gpt-index.readthedocs.io/en/latest/guides/tutorials/building_a_chatbot.html
 
+### Installing Python 3.11 on Ubuntu 22.04
+
+https://launchpad.net/~deadsnakes/+archive/ubuntu/ppa
+
+```bash
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.11 python3.11-venv
+python3 -V
+```
+
