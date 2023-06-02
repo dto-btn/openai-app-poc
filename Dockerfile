@@ -4,8 +4,6 @@ ENV TZ="Canada/Eastern"
 
 WORKDIR /app
 
-RUN pip install setuptools>=65.5.1 --upgrade
-
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
