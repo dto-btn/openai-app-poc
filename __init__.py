@@ -284,10 +284,10 @@ def _get_index(service_context: ServiceContext, storage_name: str, storage_locat
 
 def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
     # Define prompt helper
-    max_input_size = 4096
+    context_window = 4096
     num_output = 256 #hard limit
     chunk_size_limit = 1000 # token window size per document
-    max_chunk_overlap = 20 # overlap for each token fragment
+    chunk_overlap_ratio = 0.1 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = _get_llm(temperature)
@@ -295,7 +295,7 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
     logging.info(llm)
     llm_predictor = _get_llm_predictor(llm)
 
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
+    prompt_helper = PromptHelper(context_window=context_window, num_output=num_output, chunk_overlap_ratio=chunk_overlap_ratio,)
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
@@ -407,13 +407,13 @@ This one just returns a list of the outputs for the embeddings search.
 Since the question asked by the user might refer to previous "context"
 '''
 def _get_history_embeddings(history: dict) -> List[str]: 
-    outputs = history['outputs']
-    if not outputs:
+    inputs = history['inputs']
+    if not inputs:
         return None  
     
     history_list = []
     # get last n items of that list
     for i in range(_max_embeddings_history):
-        history_list.append(outputs[-i] + "\n")
+        history_list.append(inputs[-i] + "\n")
     
     return history_list
