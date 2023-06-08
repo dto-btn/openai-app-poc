@@ -53,8 +53,6 @@ azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
 credential  = DefaultAzureCredential()
 client      = SecretClient(vault_url=kv_uri, credential=credential)
 
-blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
-
 openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
 openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
@@ -68,8 +66,7 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 2
 
-
-_default_index_name = "all"
+_default_index_name = "one"
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -193,13 +190,13 @@ def build_index():
         storage = request.json["storage"]
 
     if download:
+        blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
         container_client = blob_service_client.get_container_client(container=container_name)
         for blob in container_client.list_blobs():
             _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
-
-    #filename_fn = lambda filename: {'filename': filename}
    
     SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+    #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
     documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
 
     service_context = _get_service_context()
@@ -207,7 +204,6 @@ def build_index():
     logging.info(f"Creating index: {container_name}")
     index.storage_context.persist(persist_dir=os.path.join(storage,container_name))
 
-    #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
     return jsonify({'msg': "index loaded successfully"})
 
 @app.route("/buildgraph", methods=["POST"])
@@ -327,12 +323,29 @@ def _filename_fn(filename: str) -> dict:
     fn = os.path.basename(filename)
     url = ""
 
-    # check if it's an html file, if so treat it as a url instead.
+    """ 
+    parse html file for the meta tag `canonical` and grab url. else leave it blank..
+
+    Examples: 
+
+        <meta name="url" content="https://www.tbs-sct.canada.ca/agreements-conventions/view-visualiser.aspx?id=1" />
+        or
+        <link rel="canonical" href="https://plus.ssc-spc.gc.ca/en/active-alerts" />
+        or 
+        <meta name="savepage-url" content="https://163gc.sharepoint.com/sites/VF-LFDF/SitePages/How-To-Guide.aspx">
+    """
     if filename.endswith(".html"):
-        # parse html file for the meta tag `canonical` and grab url. else leave it blank..
         with open(filename, "r") as fp:
             soup = BeautifulSoup(fp, "html.parser", from_encoding="UTF-8")
-            url = soup.find('link', {'rel': 'canonical'})['href']
+  
+        if soup.find('link', {'rel': 'canonical'}):
+            url = soup.find('link', {'rel': 'canonical'})["href"]
+        elif soup.find('meta', {'name': 'url'}):
+            url = soup.find('meta', {'name': 'url'})["content"]
+        elif soup.find('meta', {'name': 'url'}):
+            url = soup.find('meta', {'name': 'savepage-url'})["content"]
+
+        if url != "":
             print(f"Found URL in html file: {url}")
 
     # first level will be _basepath, we ignore it and we take the first level folder which is the "source"
