@@ -173,7 +173,10 @@ def query():
         r['logs'] = service_context.llama_logger.get_logs()
 
     return jsonify(r)
-    
+
+"""
+ Builds Vector index based on root folder(s) contained in a blob storage container (container_name)
+""" 
 @app.route("/build", methods=["POST"])
 def build_index():
     if "name" not in request.json:
@@ -194,15 +197,17 @@ def build_index():
         container_client = blob_service_client.get_container_client(container=container_name)
         for blob in container_client.list_blobs():
             _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
-   
-    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
 
-    service_context = _get_service_context()
-    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    logging.info(f"Creating index: {container_name}")
-    index.storage_context.persist(persist_dir=os.path.join(storage,container_name))
+    '''loop over base container folder root documents to create an index for each'''
+    for dir in os.listdir(_basepath):
+        SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+        #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
+        documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
+
+        service_context = _get_service_context()
+        index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+        logging.info(f"Creating index: {dir}")
+        index.storage_context.persist(persist_dir=os.path.join(storage, dir))
 
     return jsonify({'msg': "index loaded successfully"})
 
