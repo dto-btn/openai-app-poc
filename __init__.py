@@ -137,8 +137,7 @@ def query():
         text_qa_template=get_prompt_template(lang)
         query_bundle = query
 
-    retriever = index.as_retriever(
-        retriever_mode="default", 
+    retriever = index.as_retriever( 
         similarity_top_k=k
     )
 
@@ -147,6 +146,7 @@ def query():
         node_postprocessors=[
             SimilarityPostprocessor(similarity_cutoff=0.7)
         ],
+        response_mode="tree_summarize",
     )
 
     # assemble query engine
@@ -156,7 +156,6 @@ def query():
         service_context=service_context,
         text_qa_template=text_qa_template,
         refine_template=get_refined_prompt(lang),
-        response_mode="tree_summarize",
         verbose=True
     )
 
