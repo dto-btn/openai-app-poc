@@ -31,7 +31,7 @@ from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
-from .prompts import (get_chat_prompt_template, get_refined_prompt) 
+from .prompts import (get_chat_prompt_template, get_refined_prompt, get_prompt_template) 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -127,7 +127,7 @@ def query():
     index = _get_index(service_context=service_context, storage_name=index_name)
     
     retriever = index.as_retriever(
-        retriever_mode="default", 
+        retriever_mode="embedding", 
         similarity_top_k=k
     )
 
@@ -138,22 +138,29 @@ def query():
         ],
     )
 
+    #prompt building, and query bundle
+    if _has_history(history):
+        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history))
+        query_bundle = QueryBundle(
+            query,
+            custom_embedding_strs=_get_history_embeddings(history)
+        )
+    else:
+        text_qa_template=get_prompt_template(lang)
+        query_bundle = query
+
+
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history)),
+        text_qa_template=text_qa_template,
         refine_template=get_refined_prompt(lang),
         response_mode="tree_summarize",
         verbose=True
     )
-
-    #build QueryBundle
-    query_bundle = QueryBundle(
-        query,
-        custom_embedding_strs=_get_history_embeddings(history)
-    )
+   
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -180,19 +187,15 @@ def query():
 @app.route("/build", methods=["POST"])
 def build_index():
     if "name" not in request.json:
-        return jsonify({"error":"Request body must contain a name for the index to create"}), 400
-    
-    download = True
-    if "download" in request.json:
-        download = bool(request.json["download"])
-    
-    container_name = request.json['name']
-    storage = DEFAULT_PERSIST_DIR
+        container_name = None
+    else:
+        container_name = request.json['name']
 
+    storage = DEFAULT_PERSIST_DIR
     if "storage" in request.json:
         storage = request.json["storage"]
 
-    if download:
+    if container_name:
         blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
         container_client = blob_service_client.get_container_client(container=container_name)
         for blob in container_client.list_blobs():
@@ -200,14 +203,16 @@ def build_index():
 
     '''loop over base container folder root documents to create an index for each'''
     for dir in os.listdir(_basepath):
-        SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-        #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
-        documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
+        # list dirs that you want to skip index creation for (big ones that take 10-15 minutes ..)
+        if dir not in []:
+            SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+            #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
+            documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
 
-        service_context = _get_service_context()
-        index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-        logging.info(f"Creating index: {dir}")
-        index.storage_context.persist(persist_dir=os.path.join(storage, dir))
+            service_context = _get_service_context()
+            index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+            logging.info(f"Creating index: {dir}")
+            index.storage_context.persist(persist_dir=os.path.join(storage, dir))
 
     return jsonify({'msg': "index loaded successfully"})
 
@@ -338,6 +343,7 @@ def _filename_fn(filename: str) -> dict:
         <link rel="canonical" href="https://plus.ssc-spc.gc.ca/en/active-alerts" />
         or 
         <meta name="savepage-url" content="https://163gc.sharepoint.com/sites/VF-LFDF/SitePages/How-To-Guide.aspx">
+        <meta name="savepage-url" content="https://163gc.sharepoint.com/sites/VF-LFDF">
     """
     if filename.endswith(".html"):
         with open(filename, "r") as fp:
@@ -347,7 +353,7 @@ def _filename_fn(filename: str) -> dict:
             url = soup.find('link', {'rel': 'canonical'})["href"]
         elif soup.find('meta', {'name': 'url'}):
             url = soup.find('meta', {'name': 'url'})["content"]
-        elif soup.find('meta', {'name': 'url'}):
+        elif soup.find('meta', {'name': 'savepage-url'}):
             url = soup.find('meta', {'name': 'savepage-url'})["content"]
 
         if url != "":
@@ -435,3 +441,11 @@ def _get_history_embeddings(history: dict) -> List[str]:
         history_list.append(inputs[-i] + "\n")
     
     return history_list
+
+"""
+Check if the history map has 0 outputs and outputs
+"""
+def _has_history(history: dict) -> bool:
+    if len(history['inputs']) > 0 and len(history['outputs']) > 0:
+        return True
+    return False
