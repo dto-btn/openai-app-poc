@@ -66,7 +66,7 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 2
 
-_default_index_names = ["13-06-2023"]
+_default_index_name = "13-06-2023"
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -81,7 +81,7 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    index_names = _default_index_names
+    index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
     history = {'inputs': [], 'outputs': []}
 
@@ -90,8 +90,8 @@ def query():
     else:
         query = request.json["query"]
 
-    if "indices" in body:
-        index_names = request.json["indices"]
+    if "index" in body:
+        index_name = request.json["index"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -124,30 +124,7 @@ def query():
 
     service_context = _get_service_context(temperature)
     
-    index_set = {}
-    for name in index_names:
-        index_set[name] = _get_index(service_context=service_context, storage_name=name)
-
-    summaries = {
-        "sscplus": {
-            'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
-            'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
-    }
-
-    index_summaries = []
-    for name in index_names:
-        if name in summaries:
-            summary = ":".join([t for t in summaries[name]['en']]) + "\n" + ":".join([t for t in summaries[name]['fr']])
-            index_summaries.append(summary)
-        else:
-            index_summaries.append(f"Information about: {name}")
-    
-    graph = ComposableGraph.from_indices(
-        GPTListIndex,
-        [index_set[name] for name in index_names], 
-        index_summaries=index_summaries,
-        service_context=service_context
-    )
+    index = _get_index(service_context=service_context, storage_name=index_name)
     
     #prompt building, and query bundle
     if _has_history(history):
@@ -160,33 +137,28 @@ def query():
         text_qa_template=get_prompt_template(lang)
         query_bundle = query
 
-    custom_query_engines = {}
-    for key, value in index_set.items():
-        retriever = value.as_retriever(
-            retriever_mode="default", 
-            similarity_top_k=k
-        )
+    retriever = index.as_retriever(
+        retriever_mode="default", 
+        similarity_top_k=k
+    )
 
-        # configure response synthesizer
-        response_synthesizer = ResponseSynthesizer.from_args(
-            node_postprocessors=[
-                SimilarityPostprocessor(similarity_cutoff=0.7)
-            ],
-        )
+    # configure response synthesizer
+    response_synthesizer = ResponseSynthesizer.from_args(
+        node_postprocessors=[
+            SimilarityPostprocessor(similarity_cutoff=0.7)
+        ],
+    )
 
-        # assemble query engine
-        query_engine = RetrieverQueryEngine.from_args(
-            retriever=retriever,
-            response_synthesizer=response_synthesizer,
-            service_context=service_context,
-            text_qa_template=text_qa_template,
-            refine_template=get_refined_prompt(lang),
-            response_mode="tree_summarize",
-            verbose=True
-        )
-        custom_query_engines[key] = query_engine
-
-    query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
+    # assemble query engine
+    query_engine = RetrieverQueryEngine.from_args(
+        retriever=retriever,
+        response_synthesizer=response_synthesizer,
+        service_context=service_context,
+        text_qa_template=text_qa_template,
+        refine_template=get_refined_prompt(lang),
+        response_mode="tree_summarize",
+        verbose=True
+    )
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -212,14 +184,20 @@ def query():
 """ 
 @app.route("/build", methods=["POST"])
 def build_index():
-    if "name" not in request.json:
-        container_name = None
-    else:
+    '''name of container from where we will download the files, else ignore'''
+    container_name = None
+    if "name" in request.json:
         container_name = request.json['name']
 
+    '''aka save-as'''
     storage = DEFAULT_PERSIST_DIR
     if "storage" in request.json:
-        storage = request.json["storage"]
+        storage = os.path.join(storage, request.json["storage"])
+
+    '''folders to ignore when building the index'''
+    ignore = []
+    if "ignore" in request.json:
+        ignore = request.json["ignore"]
 
     if container_name:
         blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
@@ -228,19 +206,45 @@ def build_index():
             _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
 
     '''loop over base container folder root documents to create an index for each'''
+    documents = []
     for dir in os.listdir(_basepath):
         # list dirs that you want to skip index creation for (big ones that take 10-15 minutes ..)
-        if dir not in []:
+        if dir not in ignore:
             SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
             #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
-            documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
-
-            service_context = _get_service_context()
-            index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-            logging.info(f"Creating index: {dir}")
-            index.storage_context.persist(persist_dir=os.path.join(storage, dir))
+            documents = documents + SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
+    
+    service_context = _get_service_context()
+    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    logging.info(f"Creating index: {storage}")
+    index.storage_context.persist(persist_dir=storage)
 
     return jsonify({'msg': "index loaded successfully"})
+
+@app.route("/merge", methods=["POST"])
+def merge_indices():
+    if "indices" not in request.json:
+        return jsonify({"error":"Request body must contain name(s) of indicies to create the graph from"}), 400
+    indices = request.json['indices']
+
+    '''aka save-as'''
+    storage = DEFAULT_PERSIST_DIR
+    if "storage" in request.json:
+        storage = os.path.join(storage, request.json["storage"])
+
+    service_context = _get_service_context()
+
+    i = []
+    for name in indices:
+        i.append(_get_index(service_context=service_context, storage_name=name))
+    
+    new_index = GPTVectorStoreIndex.from_vector_store(i)
+
+    logging.info(f"Creating index: {storage}")
+    new_index.storage_context.persist(persist_dir=storage)
+
+    return jsonify({'msg': "index merged successfully"})
+
 
 @app.route("/buildgraph", methods=["POST"])
 def build_graph():
