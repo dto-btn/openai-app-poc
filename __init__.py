@@ -66,7 +66,7 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 2
 
-_default_index_name = "one"
+_default_index_names = ["13-06-2023"]
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -81,7 +81,7 @@ def query():
     body = request.json
     debug = False
     lang = "en"
-    index_name = _default_index_name
+    index_names = _default_index_names
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
     history = {'inputs': [], 'outputs': []}
 
@@ -90,8 +90,8 @@ def query():
     else:
         query = request.json["query"]
 
-    if "index" in body:
-        index_name = request.json["index"]
+    if "indices" in body:
+        index_names = request.json["indices"]
            
     if "temp" in body:
         temperature = float(request.json["temp"])
@@ -124,20 +124,31 @@ def query():
 
     service_context = _get_service_context(temperature)
     
-    index = _get_index(service_context=service_context, storage_name=index_name)
+    index_set = {}
+    for name in index_names:
+        index_set[name] = _get_index(service_context=service_context, storage_name=name)
+
+    summaries = {
+        "sscplus": {
+            'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
+            'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
+    }
+
+    index_summaries = []
+    for name in index_names:
+        if name in summaries:
+            summary = ":".join([t for t in summaries[name]['en']]) + "\n" + ":".join([t for t in summaries[name]['fr']])
+            index_summaries.append(summary)
+        else:
+            index_summaries.append(f"Information about: {name}")
     
-    retriever = index.as_retriever(
-        retriever_mode="embedding", 
-        similarity_top_k=k
+    graph = ComposableGraph.from_indices(
+        GPTListIndex,
+        [index_set[name] for name in index_names], 
+        index_summaries=index_summaries,
+        service_context=service_context
     )
-
-    # configure response synthesizer
-    response_synthesizer = ResponseSynthesizer.from_args(
-        node_postprocessors=[
-            SimilarityPostprocessor(similarity_cutoff=0.7)
-        ],
-    )
-
+    
     #prompt building, and query bundle
     if _has_history(history):
         text_qa_template=get_chat_prompt_template(lang, _history_as_str(history))
@@ -149,18 +160,33 @@ def query():
         text_qa_template=get_prompt_template(lang)
         query_bundle = query
 
+    custom_query_engines = {}
+    for key, value in index_set.items():
+        retriever = value.as_retriever(
+            retriever_mode="default", 
+            similarity_top_k=k
+        )
 
-    # assemble query engine
-    query_engine = RetrieverQueryEngine.from_args(
-        retriever=retriever,
-        response_synthesizer=response_synthesizer,
-        service_context=service_context,
-        text_qa_template=text_qa_template,
-        refine_template=get_refined_prompt(lang),
-        response_mode="tree_summarize",
-        verbose=True
-    )
-   
+        # configure response synthesizer
+        response_synthesizer = ResponseSynthesizer.from_args(
+            node_postprocessors=[
+                SimilarityPostprocessor(similarity_cutoff=0.7)
+            ],
+        )
+
+        # assemble query engine
+        query_engine = RetrieverQueryEngine.from_args(
+            retriever=retriever,
+            response_synthesizer=response_synthesizer,
+            service_context=service_context,
+            text_qa_template=text_qa_template,
+            refine_template=get_refined_prompt(lang),
+            response_mode="tree_summarize",
+            verbose=True
+        )
+        custom_query_engines[key] = query_engine
+
+    query_engine = graph.as_query_engine(custom_query_engines=custom_query_engines)
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -219,7 +245,7 @@ def build_index():
 @app.route("/buildgraph", methods=["POST"])
 def build_graph():
     index_summaries = {
-        _default_index_name: {
+        "sscplus": {
             'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
             'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
     }
@@ -392,7 +418,8 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
             if node.node.ref_doc_id not in metadata:
                 metadata[node.node.ref_doc_id] = None
                 info = node.node.extra_info
-                simple.append(info['url'] if info['url'] != "" else f"{info['filename']} ({info['source']})")
+                print("this is the info" + str(node))
+                simple.append(info['url'] if info['url'] else f"{info['filename']} ({info['source']})")
         metadata = simple
 
     return metadata
