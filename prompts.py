@@ -5,6 +5,26 @@ from langchain.prompts.chat import (AIMessagePromptTemplate,
                                     HumanMessagePromptTemplate)
 from llama_index import QuestionAnswerPrompt
 
+def get_prompt_template(lang: str) -> PromptTemplate:
+    if lang == "fr":
+        QAH_PROMPT_TMPL = (
+            "Vous êtes un IA de Services partagés Canada (SPC) propulsée par Azure OpenAI. Nous avons fourni des informations contextuelles ci-dessous.\n"
+            "\n---------------------\n"
+            "{context_str}"
+            "\n---------------------\n"
+            "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
+        )
+    else:
+        QAH_PROMPT_TMPL = (
+            "You are a Shared Services Canada (SSC) AI powered by Azure OpenAI. We have provided context information below.\n"
+            "\n---------------------\n"
+            "{context_str}"
+            "\n---------------------\n"
+            "Given this information, please answer the question: {query_str}\n"
+        )
+
+    return QuestionAnswerPrompt(QAH_PROMPT_TMPL)
+
 """
 
 NOTE: for refined prompt templates for bilingual 

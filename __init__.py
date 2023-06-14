@@ -32,7 +32,7 @@ from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
-from .prompts import (get_chat_prompt_template, get_refined_prompt) 
+from .prompts import (get_chat_prompt_template, get_refined_prompt, get_prompt_template) 
 
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 
@@ -80,17 +80,20 @@ azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
 credential  = DefaultAzureCredential()
 client      = SecretClient(vault_url=kv_uri, credential=credential)
 
-blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
-
 openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
 openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
 
-# 5 seemed to much at the moment so I reduced it, it might be better not to use embeddings.
-_max_history = 3
+'''
+Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, seems big enough. 
 
-_default_index_name = "all"
+And we will keep the embedding chat history to a minimum (and we also restrict it to outputs only ..)
+'''
+_max_history = 5
+_max_embeddings_history = 2
+
+_default_index_name = "13-06-2023"
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -150,8 +153,18 @@ def query():
     
     index = _get_index(service_context=service_context, storage_name=index_name)
     
-    retriever = index.as_retriever(
-        retriever_mode="default", 
+    #prompt building, and query bundle
+    if _has_history(history):
+        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history))
+        query_bundle = QueryBundle(
+            query,
+            custom_embedding_strs=_get_history_embeddings(history)
+        )
+    else:
+        text_qa_template=get_prompt_template(lang)
+        query_bundle = query
+
+    retriever = index.as_retriever( 
         similarity_top_k=k
     )
 
@@ -160,6 +173,7 @@ def query():
         node_postprocessors=[
             SimilarityPostprocessor(similarity_cutoff=0.7)
         ],
+        response_mode="tree_summarize",
     )
 
     # assemble query engine
@@ -167,17 +181,11 @@ def query():
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=get_chat_prompt_template(lang, _history_as_str(history)),
+        text_qa_template=text_qa_template,
         refine_template=get_refined_prompt(lang),
-        response_mode="tree_summarize",
         verbose=True
     )
 
-    #build QueryBundle
-    query_bundle = QueryBundle(
-        query,
-        #custom_embedding_strs=_get_history_embeddings(history)
-    )
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
 
@@ -199,85 +207,48 @@ def query():
         r['logs'] = service_context.llama_logger.get_logs()
 
     return jsonify(r)
-    
+
+"""
+ Builds Vector index based on root folder(s) contained in a blob storage container (container_name)
+""" 
 @app.route("/build", methods=["POST"])
 def build_index():
-    if "name" not in request.json:
-        return jsonify({"error":"Request body must contain a name for the index to create"}), 400
-    
-    download = True
-    if "download" in request.json:
-        download = bool(request.json["download"])
-    
-    container_name = request.json['name']
+    '''name of container from where we will download the files, else ignore'''
+    container_name = None
+    if "name" in request.json:
+        container_name = request.json['name']
+
+    '''aka save-as'''
     storage = DEFAULT_PERSIST_DIR
-
     if "storage" in request.json:
-        storage = request.json["storage"]
+        storage = os.path.join(storage, request.json["storage"])
 
-    if download:
+    '''folders to ignore when building the index'''
+    ignore = []
+    if "ignore" in request.json:
+        ignore = request.json["ignore"]
+
+    if container_name:
+        blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
         container_client = blob_service_client.get_container_client(container=container_name)
         for blob in container_client.list_blobs():
             _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
 
-    #filename_fn = lambda filename: {'filename': filename}
-   
-    SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
-    documents = SimpleDirectoryReader(input_dir=_basepath, recursive=True, file_metadata=_filename_fn).load_data()
-
+    '''loop over base container folder root documents to create an index for each'''
+    documents = []
+    for dir in os.listdir(_basepath):
+        # list dirs that you want to skip index creation for (big ones that take 10-15 minutes ..)
+        if dir not in ignore:
+            SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
+            #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
+            documents = documents + SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
+    
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    logger_build.info(f"Creating index: {container_name}")
-    index.storage_context.persist(persist_dir=os.path.join(storage,container_name))
+    logger_build.info(f"Creating index: {storage}")
+    index.storage_context.persist(persist_dir=storage)
 
-    #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
     return jsonify({'msg': "index loaded successfully"})
-
-@app.route("/buildgraph", methods=["POST"])
-def build_graph():
-    index_summaries = {
-        _default_index_name: {
-            'en': ["Shared Services Canada (SSC) information about the department", "Contains various information about the intranet website SSCPlus (MySSC) and the EVEC and ITSM group"],
-            'fr': ["Informations à propos du département des Services partagés Canada (SPC)", "Contient des information variées à propos du site intranet MonSpC ainsi que des groups EVEC et ITSM"]}
-    }
-    if "indices" not in request.json:
-        return jsonify({"error":"Request body must contain name(s) of indicies to create the graph from"}), 400
-    if "graph_name" not in request.json:
-        return jsonify({"error":"Request body must contain name of the graph to create"}), 400
-    
-    indices = request.json['indices']
-    graph_name = request.json['graph_name']
-
-    service_context = _get_service_context()
-    storage_context = StorageContext.from_defaults()
-
-    # define a list index over the vector indices
-    # allows us to synthesize information across each index
-    index_set = {}
-    for name in indices:
-        index_set[name] = _get_index(service_context=service_context, storage_name=name)
-
-    index_summaries = []
-    for name in indices:
-        if name in index_summaries:
-            summary = ":".join([t for t in index_summaries[name]['en']]) + "\n" + ":".join([t for t in index_summaries[name]['fr']])
-            print(summary)
-            index_summaries.append(summary)
-        else:
-            index_summaries.append(f"Shared Services Canada (SSC) information Vector index that contains information about :{name}")
-    
-    graph = ComposableGraph.from_indices(
-        GPTListIndex,
-        [index_set[name] for name in indices], 
-        index_summaries=index_summaries,
-        service_context=service_context,
-        storage_context=storage_context
-    )
-    root_id = graph.root_id
-
-    storage_context.persist(persist_dir=os.path.join(DEFAULT_PERSIST_DIR, graph_name))
-
-    return jsonify({'msg': f"graph created successfully with root_id: {root_id}"})
 
 """
 
@@ -307,10 +278,10 @@ def _get_index(service_context: ServiceContext, storage_name: str, storage_locat
 
 def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
     # Define prompt helper
-    max_input_size = 4096
+    context_window = 4096
     num_output = 256 #hard limit
     chunk_size_limit = 1000 # token window size per document
-    max_chunk_overlap = 20 # overlap for each token fragment
+    chunk_overlap_ratio = 0.1 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = _get_llm(temperature)
@@ -318,7 +289,7 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
     logging.info(llm)
     llm_predictor = _get_llm_predictor(llm)
 
-    prompt_helper = PromptHelper(max_input_size=max_input_size, num_output=num_output, max_chunk_overlap=max_chunk_overlap, chunk_size_limit=chunk_size_limit,)
+    prompt_helper = PromptHelper(context_window=context_window, num_output=num_output, chunk_overlap_ratio=chunk_overlap_ratio,)
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
@@ -350,12 +321,30 @@ def _filename_fn(filename: str) -> dict:
     fn = os.path.basename(filename)
     url = ""
 
-    # check if it's an html file, if so treat it as a url instead.
+    """ 
+    parse html file for the meta tag `canonical` and grab url. else leave it blank..
+
+    Examples: 
+
+        <meta name="url" content="https://www.tbs-sct.canada.ca/agreements-conventions/view-visualiser.aspx?id=1" />
+        or
+        <link rel="canonical" href="https://plus.ssc-spc.gc.ca/en/active-alerts" />
+        or 
+        <meta name="savepage-url" content="https://163gc.sharepoint.com/sites/VF-LFDF/SitePages/How-To-Guide.aspx">
+        <meta name="savepage-url" content="https://163gc.sharepoint.com/sites/VF-LFDF">
+    """
     if filename.endswith(".html"):
-        # parse html file for the meta tag `canonical` and grab url. else leave it blank..
         with open(filename, "r") as fp:
             soup = BeautifulSoup(fp, "html.parser", from_encoding="UTF-8")
-            url = soup.find('link', {'rel': 'canonical'})['href']
+  
+        if soup.find('link', {'rel': 'canonical'}):
+            url = soup.find('link', {'rel': 'canonical'})["href"]
+        elif soup.find('meta', {'name': 'url'}):
+            url = soup.find('meta', {'name': 'url'})["content"]
+        elif soup.find('meta', {'name': 'savepage-url'}):
+            url = soup.find('meta', {'name': 'savepage-url'})["content"]
+
+        if url != "":
             print(f"Found URL in html file: {url}")
 
     # first level will be _basepath, we ignore it and we take the first level folder which is the "source"
@@ -391,7 +380,8 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
             if node.node.ref_doc_id not in metadata:
                 metadata[node.node.ref_doc_id] = None
                 info = node.node.extra_info
-                simple.append(info['url'] if info['url'] != "" else f"{info['filename']} ({info['source']})")
+                print("this is the info" + str(node))
+                simple.append(info['url'] if info['url'] else f"{info['filename']} ({info['source']})")
         metadata = simple
 
     return metadata
@@ -429,14 +419,22 @@ def _history_as_str(history: dict) -> str:
 This one just returns a list of the outputs for the embeddings search. 
 Since the question asked by the user might refer to previous "context"
 '''
-def _get_history_embeddings(history: dict) -> List[str]:    
-    outputs = history['outputs']
-
+def _get_history_embeddings(history: dict) -> List[str]: 
+    inputs = history['inputs']
+    if not inputs:
+        return None  
+    
     history_list = []
-
-    for index, _ in enumerate(outputs):
-        history_list.append(outputs[index] + "\n")
-
-    if not history_list:
-        return None
+    # get last n items of that list
+    for i in range(_max_embeddings_history):
+        history_list.append(inputs[-i] + "\n")
+    
     return history_list
+
+"""
+Check if the history map has 0 outputs and outputs
+"""
+def _has_history(history: dict) -> bool:
+    if len(history['inputs']) > 0 and len(history['outputs']) > 0:
+        return True
+    return False
