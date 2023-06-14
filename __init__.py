@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -33,8 +34,34 @@ from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
 from .prompts import (get_chat_prompt_template, get_refined_prompt) 
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+
+def my_namer(default_name):
+    # This will be called when doing the log rotation
+    # default_name is the default filename that would be assigned, e.g. Rotate_Test.txt.YYYY-MM-DD
+    # Do any manipulations to that name here, for example this changes the name to Rotate_Test.YYYY-MM-DD.txt
+    base_filename, ext, date = default_name.split(".")
+    return f"{base_filename}.{date}.{ext}"
+
+def setup_logger(name, log_file, level=logging.INFO):
+    """To setup as many loggers as you want"""
+
+    handler = logging.handlers.TimedRotatingFileHandler(log_file, when='midnight', backupCount=30, encoding='utf-8')      
+    handler.namer = my_namer
+    handler.setFormatter(formatter)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+
+    return logger
+
+#logging.basicConfig(filename='app.log', filemode='w', encoding='utf-8', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s', level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
+#logging.getLogger().addHandler(logging.FileHandler(filename='app.log', mode='w', encoding='utf-8'))
+
+logger_query = setup_logger('query', 'openai-app-poc-query.log')
+logger_build = setup_logger('build', 'openai-app-poc-build.log')
 
 load_dotenv()
 
@@ -116,7 +143,7 @@ def query():
             if 'inputs' not in history or 'outputs' not in history:
                 raise Exception("Unable to properly parse chat_history")
         except:
-            logging.error("Unable to convert chat_history to a proper map that contains input and outputs..")
+            logger_query.error("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
 
     service_context = _get_service_context(temperature)
@@ -165,6 +192,9 @@ def query():
             'chat_history': str(history_enc, 'utf-8')
         }
 
+    for data in r.keys():
+        logger_query.info(f"{data}: {r[data]}")
+
     if debug:
         r['logs'] = service_context.llama_logger.get_logs()
 
@@ -197,7 +227,7 @@ def build_index():
 
     service_context = _get_service_context()
     index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
-    logging.info(f"Creating index: {container_name}")
+    logger_build.info(f"Creating index: {container_name}")
     index.storage_context.persist(persist_dir=os.path.join(storage,container_name))
 
     #return GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
@@ -374,7 +404,7 @@ def _update_chat_history(history: dict, query: str, response: str, lang: str) ->
         human_prefix = "Humain: "
 
     while len(history['inputs']) >= _max_history:
-        logging.debug("history is too big, truncating ..")
+        logger_query.debug("history is too big, truncating ..")
         history['inputs'].pop(0)
         history['outputs'].pop(0)
          
