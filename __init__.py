@@ -91,7 +91,7 @@ Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, see
 And we will keep the embedding chat history to a minimum (and we also restrict it to outputs only ..)
 '''
 _max_history = 5
-_max_embeddings_history = 2
+_max_embeddings_history = 1
 
 _default_index_name = "13-06-2023"
 
@@ -111,6 +111,7 @@ def query():
     index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
     history = {'inputs': [], 'outputs': []}
+    history_embeddings = False
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -146,23 +147,24 @@ def query():
             if 'inputs' not in history or 'outputs' not in history:
                 raise Exception("Unable to properly parse chat_history")
         except:
-            logger_query.error("Unable to convert chat_history to a proper map that contains input and outputs..")
+            logger_query.warn("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
 
     service_context = _get_service_context(temperature)
     
     index = _get_index(service_context=service_context, storage_name=index_name)
-    
+    query_bundle = query
+
     #prompt building, and query bundle
     if _has_history(history):
         text_qa_template=get_chat_prompt_template(lang, _history_as_str(history))
-        query_bundle = QueryBundle(
-            query,
-            custom_embedding_strs=_get_history_embeddings(history)
-        )
+        if history_embeddings:
+            query_bundle = QueryBundle(
+                query,
+                custom_embedding_strs=_get_history_embeddings(history)
+            )
     else:
         text_qa_template=get_prompt_template(lang)
-        query_bundle = query
 
     retriever = index.as_retriever( 
         similarity_top_k=k
@@ -204,6 +206,7 @@ def query():
         logger_query.info(f"{data}: {r[data]}")
 
     if debug:
+        logger_query.debug(service_context.llama_logger.get_logs())
         r['logs'] = service_context.llama_logger.get_logs()
 
     return jsonify(r)
@@ -421,13 +424,17 @@ Since the question asked by the user might refer to previous "context"
 '''
 def _get_history_embeddings(history: dict) -> List[str]: 
     inputs = history['inputs']
+    outputs = history['outputs']
+    size = len(inputs) - 1
     if not inputs:
         return None  
     
     history_list = []
     # get last n items of that list
     for i in range(_max_embeddings_history):
-        history_list.append(inputs[-i] + "\n")
+        print(f"range is {i}")
+        history_list.append(inputs[size-i] + "\n" + outputs[size-i] + "\n")
+        print(f"history added is  {history_list}")
     
     return history_list
 
