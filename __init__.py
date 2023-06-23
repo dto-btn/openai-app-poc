@@ -150,6 +150,9 @@ def query():
             logger_query.warn("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
 
+    if "history_embeddings" in body:
+        history_embeddings = bool(request.json["history_embeddings"])
+
     service_context = _get_service_context(temperature)
     
     index = _get_index(service_context=service_context, storage_name=index_name)
