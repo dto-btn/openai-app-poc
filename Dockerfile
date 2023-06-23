@@ -8,8 +8,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
-COPY __init__.py ./app.py
-COPY prompts.py ./prompts.py
+COPY app/ ./app/
 
 RUN addgroup --gid 1001 --system app && \
     adduser --no-create-home --shell /bin/false --disabled-password --uid 1001 --system --group app && \
