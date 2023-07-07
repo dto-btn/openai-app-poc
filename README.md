@@ -30,10 +30,10 @@ curl --location 'http://127.0.0.1:5000/query' \
 ### build image and run it
 
 ```bash
-docker build -t scdcciodtoopenaipoccontainerregistry.azurecr.io/app .
-docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app
+docker build -t scdcciodtoopenaipoccontainerregistry.azurecr.io/app:3.0.2 .
+docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app:3.0.2
 # then you can run it via 
-docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/app
+docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/openai-app-poc:3.0.2
 ```
 
 ### troubleshooting
