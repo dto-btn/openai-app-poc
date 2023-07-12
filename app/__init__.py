@@ -32,7 +32,7 @@ from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
-from .prompts import (get_chat_prompt_template, get_refined_prompt, get_prompt_template) 
+from app.prompts.qna import (get_chat_prompt_template, get_prompt_template, get_refined_prompt)
 
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 

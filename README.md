@@ -11,7 +11,7 @@ pip install -r requirements.txt --upgrade
 
 Might need to run `Ctrl+Shift+P` in VSCode, type `Python: Create environment...` and follow instructions if needed.
 
-To run the application simply do `flask --debug --app __init__.py run`
+To run the application simply do `flask --debug --app app run`
 
 ### sending a query
 
@@ -30,10 +30,10 @@ curl --location 'http://127.0.0.1:5000/query' \
 ### build image and run it
 
 ```bash
-docker build -t scdcciodtoopenaipoccontainerregistry.azurecr.io/app .
-docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app
+docker build -t scdcciodtoopenaipoccontainerregistry.azurecr.io/app:3.0.2 .
+docker push scdcciodtoopenaipoccontainerregistry.azurecr.io/app:3.0.2
 # then you can run it via 
-docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/app
+docker run -it --env-file .env scdcciodtoopenaipoccontainerregistry.azurecr.io/openai-app-poc:3.0.2
 ```
 
 ### troubleshooting
