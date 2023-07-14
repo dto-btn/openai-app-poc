@@ -4,7 +4,7 @@ ENV TZ="Canada/Eastern"
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements-freeze.txt requirements.txt
 
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
