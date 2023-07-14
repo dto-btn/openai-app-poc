@@ -20,12 +20,16 @@ from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
 
 from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
-                         PromptHelper,
-                         ResponseSynthesizer, ServiceContext, StorageContext,
+                         PromptHelper, ServiceContext, StorageContext,
                          download_loader, load_index_from_storage, QueryBundle)
 
 from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
+from llama_index.response_synthesizers import get_response_synthesizer
+from llama_index import set_global_service_context
+from llama_index.retrievers import (
+    VectorIndexRetriever,
+)
 
 from llama_index.llm_predictor import LLMPredictor
 from llama_index.query_engine import RetrieverQueryEngine
@@ -154,6 +158,7 @@ def query():
         history_embeddings = bool(request.json["history_embeddings"])
 
     service_context = _get_service_context(temperature)
+    set_global_service_context(service_context)
     
     index = _get_index(service_context=service_context, storage_name=index_name)
     query_bundle = query
@@ -169,17 +174,10 @@ def query():
     else:
         text_qa_template=get_prompt_template(lang)
 
-    retriever = index.as_retriever( 
-        similarity_top_k=k
-    )
+    retriever = VectorIndexRetriever(index=index, similarity_top_k=2)
 
     # configure response synthesizer
-    response_synthesizer = ResponseSynthesizer.from_args(
-        node_postprocessors=[
-            SimilarityPostprocessor(similarity_cutoff=0.7)
-        ],
-        response_mode="tree_summarize",
-    )
+    response_synthesizer = get_response_synthesizer(response_mode="tree_summarize")
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
@@ -300,8 +298,12 @@ def _get_service_context(temperature: float = 0.7, history: ConversationBufferMe
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
         OpenAIEmbeddings(
-            model="text-embedding-ada-002",
-            ), 
+            model="text-embedding-ada-002", 
+            deployment="text-embedding-ada-002", 
+            openai_api_key=openai.api_key,
+            openai_api_base=openai.api_base,
+            openai_api_type=openai.api_type,
+            openai_api_version=openai.api_version), 
             embed_batch_size=1)
 
     return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm)
