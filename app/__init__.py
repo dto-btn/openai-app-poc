@@ -9,6 +9,7 @@ import base64
 import json
 
 import openai
+from flask_cors import CORS
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
@@ -70,6 +71,7 @@ logger_build = setup_logger('build', 'openai-app-poc-build.log')
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 
 #storage_account_name = os.environ["STORAGE_ACCNT_NAME"]
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
