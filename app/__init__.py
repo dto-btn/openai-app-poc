@@ -99,7 +99,7 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 1
 
-_default_index_name = "13-06-2023"
+_default_index_name = "2023-07-19"
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -176,7 +176,7 @@ def query():
     else:
         text_qa_template=get_prompt_template(lang)
 
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=2)
+    retriever = VectorIndexRetriever(index=index, similarity_top_k=k)
 
     # configure response synthesizer
     response_synthesizer = get_response_synthesizer(response_mode="tree_summarize")
