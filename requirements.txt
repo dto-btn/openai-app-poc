@@ -2,6 +2,7 @@ azure-identity
 azure-keyvault-secrets
 azure-storage-blob
 Flask
+flask-cors
 gunicorn
 langchain
 llama-index
