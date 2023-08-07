@@ -380,9 +380,10 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
             if node.node.ref_doc_id not in metadata:
                 scores[node.node.ref_doc_id] = [node.score]
                 metadata[node.node.ref_doc_id] = node.node.extra_info
-                metadata[node.node.ref_doc_id]["text"] = node.node.text
+                metadata[node.node.ref_doc_id]["text"] = [node.node.text]
             else:
                 scores[node.node.ref_doc_id].append(node.score)
+                metadata[node.node.ref_doc_id]["text"].append(node.node.text)
 
         [v.update({"node_scores": scores[k]}) for k, v in metadata.items()]
     else:
