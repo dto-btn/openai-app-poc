@@ -39,35 +39,6 @@ from llama_index.vector_stores.types import VectorStore
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
 
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-
-def my_namer(default_name):
-    # This will be called when doing the log rotation
-    # default_name is the default filename that would be assigned, e.g. Rotate_Test.txt.YYYY-MM-DD
-    # Do any manipulations to that name here, for example this changes the name to Rotate_Test.YYYY-MM-DD.txt
-    base_filename, ext, date = default_name.split(".")
-    return f"{base_filename}.{date}.{ext}"
-
-def setup_logger(name, log_file, level=logging.INFO):
-    """To setup as many loggers as you want"""
-
-    handler = logging.handlers.TimedRotatingFileHandler(log_file, when='midnight', backupCount=30, encoding='utf-8')      
-    handler.namer = my_namer
-    handler.setFormatter(formatter)
-
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    logger.addHandler(handler)
-
-    return logger
-
-#logging.basicConfig(filename='app.log', filemode='w', encoding='utf-8', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s', level=logging.INFO)
-logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
-#logging.getLogger().addHandler(logging.FileHandler(filename='app.log', mode='w', encoding='utf-8'))
-
-logger_query = setup_logger('query', 'openai-app-poc-query.log')
-logger_build = setup_logger('build', 'openai-app-poc-build.log')
-
 load_dotenv()
 
 app = Flask(__name__)
@@ -89,7 +60,7 @@ client      = SecretClient(vault_url=kv_uri, credential=credential)
 openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
 openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
-azure_openai_key   = client.get_secret("AzureOpenAIKey").value
+azure_openai_key   = client.get_secret(os.getenv("OPENAI_KEY_NAME", "AzureOpenAIKey")).value
 if azure_openai_key is not None:
     openai.api_key = os.environ["OPENAI_API_KEY"] = azure_openai_key
 
@@ -155,7 +126,7 @@ def query():
             if 'inputs' not in history or 'outputs' not in history:
                 raise Exception("Unable to properly parse chat_history")
         except:
-            logger_query.warn("Unable to convert chat_history to a proper map that contains input and outputs..")
+            print("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
 
     if "history_embeddings" in body:
@@ -208,10 +179,10 @@ def query():
         }
 
     for data in r.keys():
-        logger_query.info(f"{data}: {r[data]}")
+        print(f"{data}: {r[data]}")
 
     if debug:
-        logger_query.debug(service_context.llama_logger.get_logs())
+        print(service_context.llama_logger.get_logs())
         r['logs'] = service_context.llama_logger.get_logs()
 
     return jsonify(r)
@@ -254,7 +225,7 @@ def build_index():
     
     service_context = _get_service_context()
     index = VectorStoreIndex.from_documents(documents, service_context=service_context)
-    logger_build.info(f"Creating index: {storage}")
+    print(f"Creating index: {storage}")
     index.storage_context.persist(persist_dir=storage)
 
     return jsonify({'msg': "index loaded successfully"})
@@ -412,7 +383,7 @@ def _update_chat_history(history: dict, query: str, response: str, lang: str) ->
         human_prefix = "Humain: "
 
     while len(history['inputs']) >= _max_history:
-        logger_query.debug("history is too big, truncating ..")
+        print("history is too big, truncating ..")
         history['inputs'].pop(0)
         history['outputs'].pop(0)
          

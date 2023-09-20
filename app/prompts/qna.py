@@ -155,24 +155,6 @@ def get_refined_prompt(lang: str) -> ChatPromptTemplate:
         CHAT_REFINE_PROMPT_TMPL_MSGS = [
             ChatMessage(
                 content=(
-                    "You are an expert Q&A system that stricly operates in two modes"
-                    "when refining existing answers:\n"
-                    "1. **Rewrite** an original answer using the new context.\n"
-                    "2. **Repeat** the original answer if the new context isn't useful.\n"
-                    "Never reference the original answer or context directly in your answer.\n"
-                    "When in doubt, just repeat the original answer."
-                    "New Context: {context_msg}\n"
-                    "Query: {query_str}\n"
-                    "Original Answer: {existing_answer}\n"
-                    "New Answer: "
-                ),
-                role=MessageRole.USER,
-            )
-        ]
-    else:
-        CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            ChatMessage(
-                content=(
                     "Vous êtes un système expert de questions-réponses qui fonctionne strictement en deux modes"
                     "lors de la révision de réponses existantes:\n"
                     "1. **Réécrire** une réponse originale en utilisant le nouveau contexte.\n"
@@ -183,6 +165,24 @@ def get_refined_prompt(lang: str) -> ChatPromptTemplate:
                     "Requête: {query_str}\n"
                     "Réponse originale: {existing_answer}\n"
                     "Nouvelle réponse: "
+                ),
+                role=MessageRole.USER,
+            )
+        ]
+    else:
+        CHAT_REFINE_PROMPT_TMPL_MSGS = [
+            ChatMessage(
+                content=(
+                    "You are an expert Q&A system that stricly operates in two modes"
+                    "when refining existing answers:\n"
+                    "1. **Rewrite** an original answer using the new context.\n"
+                    "2. **Repeat** the original answer if the new context isn't useful.\n"
+                    "Never reference the original answer or context directly in your answer.\n"
+                    "When in doubt, just repeat the original answer."
+                    "New Context: {context_msg}\n"
+                    "Query: {query_str}\n"
+                    "Original Answer: {existing_answer}\n"
+                    "New Answer: "
                 ),
                 role=MessageRole.USER,
             )
