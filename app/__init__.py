@@ -1,43 +1,43 @@
+import ast
+import base64
+import json
 import logging
 import logging.handlers
 import os
 import sys
 import time
 from typing import List
-import ast
-import base64
-import json
 
 import openai
-from flask_cors import CORS
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from langchain.chains.conversation.memory import ConversationBufferMemory
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
-
-from llama_index import (GPTListIndex, GPTVectorStoreIndex, LangchainEmbedding,
-                         PromptHelper, ServiceContext, StorageContext,
-                         download_loader, load_index_from_storage, QueryBundle)
-
+from llama_index import (GPTListIndex, LangchainEmbedding, PromptHelper,
+                         QueryBundle, ServiceContext, SimpleDirectoryReader,
+                         StorageContext, VectorStoreIndex,
+                         load_index_from_storage, set_global_service_context)
+from llama_index.indices.base import BaseIndex
 from llama_index.indices.composability import ComposableGraph
 from llama_index.indices.postprocessor import SimilarityPostprocessor
-from llama_index.response_synthesizers import get_response_synthesizer
-from llama_index import set_global_service_context
-from llama_index.retrievers import (
-    VectorIndexRetriever,
-)
-
 from llama_index.llm_predictor import LLMPredictor
 from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
+from llama_index.response_synthesizers import get_response_synthesizer
+from llama_index.response_synthesizers.type import ResponseMode
+from llama_index.retrievers import VectorIndexRetriever
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
+from llama_index.vector_stores import SimpleVectorStore
+from llama_index.vector_stores.types import VectorStore
 
-from app.prompts.qna import (get_chat_prompt_template, get_prompt_template, get_refined_prompt)
+from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
+                             get_refined_prompt)
 
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 
@@ -88,8 +88,10 @@ client      = SecretClient(vault_url=kv_uri, credential=credential)
 
 openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
 openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
-openai.api_key     = os.environ["OPENAI_API_KEY"]     = client.get_secret("AzureOpenAIKey").value
 openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
+azure_openai_key   = client.get_secret("AzureOpenAIKey").value
+if azure_openai_key is not None:
+    openai.api_key = os.environ["OPENAI_API_KEY"] = azure_openai_key
 
 '''
 Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, seems big enough. 
@@ -111,7 +113,7 @@ def query():
     query = ""
     k = 2 # default
     temperature = 0.7 # default
-    body = request.json
+    body = request.get_json(force=True)
     debug = False
     lang = "en"
     index_name = _default_index_name
@@ -122,31 +124,31 @@ def query():
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
     else:
-        query = request.json["query"]
+        query = body["query"]
 
     if "index" in body:
-        index_name = request.json["index"]
+        index_name = body["index"]
            
     if "temp" in body:
-        temperature = float(request.json["temp"])
+        temperature = float(body["temp"])
 
     if "k" in body:
-        k = int(request.json["k"])
+        k = int(body["k"])
 
     if "debug" in body:
-        debug = bool(request.json["debug"])
+        debug = bool(body["debug"])
 
     if "pretty" in body:
-        pretty = bool(request.json["pretty"])
+        pretty = bool(body["pretty"])
 
     if "lang" in body:
-        if str(request.json["lang"]) == "fr":
+        if str(body["lang"]) == "fr":
             lang = "fr"
     
     if "chat_history" in body:
         # try and conver the chat history into a map
         try:
-            encoded = request.json["chat_history"]
+            encoded = body["chat_history"]
             decoded = base64.b64decode(encoded)
             history = json.loads(decoded)
             # validate we have an input and output key
@@ -157,12 +159,12 @@ def query():
             history = {'inputs': [], 'outputs': []}
 
     if "history_embeddings" in body:
-        history_embeddings = bool(request.json["history_embeddings"])
+        history_embeddings = bool(body["history_embeddings"])
 
     service_context = _get_service_context(temperature)
     set_global_service_context(service_context)
     
-    index = _get_index(service_context=service_context, storage_name=index_name)
+    index = _get_index(index_name=index_name)
     query_bundle = query
 
     #prompt building, and query bundle
@@ -176,10 +178,10 @@ def query():
     else:
         text_qa_template=get_prompt_template(lang)
 
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=k)
+    retriever = VectorIndexRetriever(index=index, similarity_top_k=k) # type: ignore
 
     # configure response synthesizer
-    response_synthesizer = get_response_synthesizer(response_mode="tree_summarize")
+    response_synthesizer = get_response_synthesizer(response_mode=ResponseMode.REFINE)
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
@@ -221,36 +223,37 @@ def query():
 def build_index():
     '''name of container from where we will download the files, else ignore'''
     container_name = None
-    if "name" in request.json:
-        container_name = request.json['name']
+    body = request.get_json(force=True)
+    if "name" in body:
+        container_name = body['name']
 
     '''aka save-as'''
     storage = DEFAULT_PERSIST_DIR
-    if "storage" in request.json:
-        storage = os.path.join(storage, request.json["storage"])
+    if "storage" in body:
+        storage = os.path.join(storage, body["storage"])
 
     '''folders to ignore when building the index'''
     ignore = []
-    if "ignore" in request.json:
-        ignore = request.json["ignore"]
+    if "ignore" in body:
+        ignore = body["ignore"]
 
     if container_name:
-        blob_service_client = BlobServiceClient.from_connection_string(client.get_secret("openai-storage-connection").value)
-        container_client = blob_service_client.get_container_client(container=container_name)
-        for blob in container_client.list_blobs():
-            _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
-
+        storage_connection = client.get_secret("openai-storage-connection").value
+        if storage_connection is not None:
+            blob_service_client = BlobServiceClient.from_connection_string(storage_connection)
+            container_client = blob_service_client.get_container_client(container=container_name)
+            for blob in container_client.list_blobs():
+                _download_blob_to_file(blob_service_client, container_name=container_name, blob_name=blob.name)
     '''loop over base container folder root documents to create an index for each'''
     documents = []
     for dir in os.listdir(_basepath):
         # list dirs that you want to skip index creation for (big ones that take 10-15 minutes ..)
         if dir not in ignore:
-            SimpleDirectoryReader  = download_loader("SimpleDirectoryReader")
             #documents = SimpleDirectoryReader(input_dir=os.path.join(_basepath,container_name), recursive=True, file_metadata=_filename_fn).load_data()
             documents = documents + SimpleDirectoryReader(input_dir=os.path.join(_basepath, dir), recursive=True, file_metadata=_filename_fn).load_data()
     
     service_context = _get_service_context()
-    index = GPTVectorStoreIndex.from_documents(documents, service_context=service_context)
+    index = VectorStoreIndex.from_documents(documents, service_context=service_context)
     logger_build.info(f"Creating index: {storage}")
     index.storage_context.persist(persist_dir=storage)
 
@@ -278,11 +281,14 @@ def _download_blob_to_file(blob_service_client: BlobServiceClient, container_nam
 Loads a Vector Index from the local filesystem
 
 """    
-def _get_index(service_context: ServiceContext, storage_name: str, storage_location: str = DEFAULT_PERSIST_DIR) -> "GPTVectorStoreIndex":
-    return load_index_from_storage(service_context=service_context, 
-                                   storage_context=StorageContext.from_defaults(persist_dir=os.path.join(storage_location, storage_name)))
+def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
+    storage_context = StorageContext.from_defaults(persist_dir=os.path.join(storage_location, index_name))
+    # index needs to be recreated its missing metadata for this code to work properly.
+    #vector_store = SimpleVectorStore.from_persist_dir(persist_dir=os.path.join(storage_location, index_name))
+    #return VectorStoreIndex.from_vector_store(vector_store=vector_store)
+    return load_index_from_storage(storage_context)
 
-def _get_service_context(temperature: float = 0.7, history: ConversationBufferMemory = None) -> "ServiceContext":
+def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     # Define prompt helper
     context_window = 4096
     num_output = 256 #hard limit
@@ -348,11 +354,11 @@ def _filename_fn(filename: str) -> dict:
             soup = BeautifulSoup(fp, "html.parser", from_encoding="UTF-8")
   
         if soup.find('link', {'rel': 'canonical'}):
-            url = soup.find('link', {'rel': 'canonical'})["href"]
+            url = soup.find('link', {'rel': 'canonical'})["href"] # type: ignore
         elif soup.find('meta', {'name': 'url'}):
-            url = soup.find('meta', {'name': 'url'})["content"]
+            url = soup.find('meta', {'name': 'url'})["content"] # type: ignore
         elif soup.find('meta', {'name': 'savepage-url'}):
-            url = soup.find('meta', {'name': 'savepage-url'})["content"]
+            url = soup.find('meta', {'name': 'savepage-url'})["content"] # type: ignore
 
         if url != "":
             print(f"Found URL in html file: {url}")
@@ -380,10 +386,10 @@ def _response_metadata(response: RESPONSE_TYPE, pretty: bool):
             if node.node.ref_doc_id not in metadata:
                 scores[node.node.ref_doc_id] = [node.score]
                 metadata[node.node.ref_doc_id] = node.node.extra_info
-                metadata[node.node.ref_doc_id]["text"] = [node.node.text]
+                metadata[node.node.ref_doc_id]["text"] = [node.text]
             else:
                 scores[node.node.ref_doc_id].append(node.score)
-                metadata[node.node.ref_doc_id]["text"].append(node.node.text)
+                metadata[node.node.ref_doc_id]["text"].append(node.text)
 
         [v.update({"node_scores": scores[k]}) for k, v in metadata.items()]
     else:
@@ -436,7 +442,7 @@ def _get_history_embeddings(history: dict) -> List[str]:
     outputs = history['outputs']
     size = len(inputs) - 1
     if not inputs:
-        return None  
+        return [""]  
     
     history_list = []
     # get last n items of that list
