@@ -1,29 +1,72 @@
-from langchain import PromptTemplate
-from llama_index import QuestionAnswerPrompt, RefinePrompt
-from langchain.prompts.chat import (AIMessagePromptTemplate,
-                                    ChatPromptTemplate,
-                                    HumanMessagePromptTemplate)
-from llama_index import QuestionAnswerPrompt
+from llama_index.llms.base import ChatMessage, MessageRole
+from llama_index.prompts.base import ChatPromptTemplate
 
-def get_prompt_template(lang: str) -> PromptTemplate:
+# todo: update qna prompts using those examples to further refine answers : https://github.com/jerryjliu/llama_index/blob/main/llama_index/prompts/chat_prompts.py
+def get_prompt_template(lang: str) -> ChatPromptTemplate:
     if lang == "fr":
-        QAH_PROMPT_TMPL = (
-            "Vous êtes un IA de Services partagés Canada (SPC) propulsée par Azure OpenAI. Nous avons fourni des informations contextuelles ci-dessous.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Compte tenu de ces informations, veuillez répondre à la question suivante dans la langue française: {query_str}\n"
-        )
-    else:
-        QAH_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) AI powered by Azure OpenAI. We have provided context information below.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Given this information, please answer the question: {query_str}\n"
+        TEXT_QA_SYSTEM_PROMPT = ChatMessage(
+            content=(
+                "Vous êtes un système d'experts en questions-réponses de Services partagés Canada (SPC) de confiance.\n"
+                "Répondez toujours à la requête en utilisant les informations de contexte fournies, "
+                "et non des connaissances antérieures.\n"
+                "Voici quelques règles à suivre :\n"
+                "1. Ne faites jamais référence directement au contexte donné dans votre réponse.\n"
+                "2. Évitez des déclarations telles que 'En fonction du contexte, ...' ou "
+                "'Les informations de contexte ...' ou tout ce qui va dans ce sens."
+                "3. Répondez dans la langue française."
+            ),
+            role=MessageRole.SYSTEM,
         )
 
-    return QuestionAnswerPrompt(QAH_PROMPT_TMPL)
+        TEXT_QA_PROMPT_TMPL_MSGS = [
+            TEXT_QA_SYSTEM_PROMPT,
+            ChatMessage(
+                content=(
+                    "Les informations de contexte sont ci-dessous.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Compte tenu des informations de contexte et non des connaissances antérieures, "
+                    "répondez à la requête.\n"
+                    "Requête : {query_str}\n"
+                    "Réponse : "
+                ),
+                role=MessageRole.USER,
+            ),
+        ]
+    else:
+        TEXT_QA_SYSTEM_PROMPT = ChatMessage(
+            content=(
+                "You are an expert Shared Services Canada (SSC) Q&A system that is trusted.\n"
+                "Always answer the query using the provided context information, "
+                "and not prior knowledge.\n"
+                "Some rules to follow:\n"
+                "1. Never directly reference the given context in your answer.\n"
+                "2. Avoid statements like 'Based on the context, ...' or "
+                "'The context information ...' or anything along "
+                "those lines."
+            ),
+            role=MessageRole.SYSTEM,
+        )
+
+        TEXT_QA_PROMPT_TMPL_MSGS = [
+            TEXT_QA_SYSTEM_PROMPT,
+            ChatMessage(
+                content=(
+                    "Context information is below.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Given the context information and not prior knowledge, "
+                    "answer the query.\n"
+                    "Query: {query_str}\n"
+                    "Answer: "
+                ),
+                role=MessageRole.USER,
+            ),
+        ]
+
+    return ChatPromptTemplate(message_templates=TEXT_QA_PROMPT_TMPL_MSGS)
 
 """
 
@@ -36,66 +79,112 @@ SEE:
     * https://github.com/jerryjliu/llama_index/issues/1335
 
 """
-def get_chat_prompt_template(lang: str, history_str: str) -> PromptTemplate:
+def get_chat_prompt_template(lang: str, history_str: str) -> ChatPromptTemplate:
     if lang == "fr":
-        QAH_PROMPT_TMPL = (
-            "Vous êtes un IA de Services partagés Canada (SPC) propulsée par Azure OpenAI. Nous avons fourni des informations contextuelles ci-dessous.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Voici un historique de la conversation:\n"
-            f"{history_str}\n"
-            "Humain: {query_str}\n"
-            "IA:"
+        TEXT_QA_SYSTEM_PROMPT = ChatMessage(
+            content=(
+                "Vous êtes un système d'experts en questions-réponses de Services partagés Canada (SPC) de confiance.\n"
+                "Répondez toujours à la requête en utilisant les informations de contexte fournies, "
+                "et non des connaissances antérieures.\n"
+                "Voici quelques règles à suivre :\n"
+                "1. Ne faites jamais référence directement au contexte donné dans votre réponse.\n"
+                "2. Évitez des déclarations telles que 'En fonction du contexte, ...' ou "
+                "'Les informations de contexte ...' ou tout ce qui va dans ce sens."
+                "3. Répondez dans la langue française."
+            ),
+            role=MessageRole.SYSTEM,
         )
+
+        TEXT_QA_PROMPT_TMPL_MSGS = [
+            TEXT_QA_SYSTEM_PROMPT,
+            ChatMessage(
+                content=(
+                    "Les informations de contexte sont ci-dessous.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Voici un historique de la conversation:\n"
+                    f"{history_str}\n"
+                    "Compte tenu des informations de contexte et non des connaissances antérieures, "
+                    "répondez à la requête.\n"
+                    "Requête : {query_str}\n"
+                    "Réponse : "
+                ),
+                role=MessageRole.USER,
+            ),
+        ]
     else:
-        QAH_PROMPT_TMPL = (
-            "You are a Shared Services Canada (SSC) AI powered by Azure OpenAI. We have provided context information below.\n"
-            "\n---------------------\n"
-            "{context_str}"
-            "\n---------------------\n"
-            "Here is an history of the conversation:\n"
-            f"{history_str}\n"
-            "Human: {query_str}\n"
-            "AI:"
+        TEXT_QA_SYSTEM_PROMPT = ChatMessage(
+            content=(
+                "You are an expert Shared Services Canada (SSC) Q&A system that is trusted.\n"
+                "Always answer the query using the provided context information, "
+                "and not prior knowledge.\n"
+                "Some rules to follow:\n"
+                "1. Never directly reference the given context in your answer.\n"
+                "2. Avoid statements like 'Based on the context, ...' or "
+                "'The context information ...' or anything along "
+                "those lines."
+            ),
+            role=MessageRole.SYSTEM,
         )
 
-    return QuestionAnswerPrompt(QAH_PROMPT_TMPL)
+        TEXT_QA_PROMPT_TMPL_MSGS = [
+            TEXT_QA_SYSTEM_PROMPT,
+            ChatMessage(
+                content=(
+                    "Context information is below.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Here is an history of the conversation:\n"
+                    f"{history_str}\n"
+                    "Given the context information and not prior knowledge, "
+                    "answer the query.\n"
+                    "Query: {query_str}\n"
+                    "Answer: "
+                ),
+                role=MessageRole.USER,
+            ),
+        ]
 
-def get_refined_prompt(lang: str):
+    return ChatPromptTemplate(message_templates=TEXT_QA_PROMPT_TMPL_MSGS)
+
+def get_refined_prompt(lang: str) -> ChatPromptTemplate:
     # Refine Prompt
     if lang == "fr":
         CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "J'ai plus de contexte ci-dessous qui peut être utilisé"
-                "(uniquement si nécessaire) pour mettre à jour votre réponse précédente.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Compte tenu du nouveau contexte, mettre à jour la réponse précédente pour mieux"
-                "répondre à ma question précédente."
-                "Si la réponse précédente reste la même, répétez-la textuellement."
-                "Ne référencez jamais directement le nouveau contexte ou ma requête précédente.",
-            ),
+            ChatMessage(
+                content=(
+                    "Vous êtes un système expert de questions-réponses qui fonctionne strictement en deux modes"
+                    "lors de la révision de réponses existantes:\n"
+                    "1. **Réécrire** une réponse originale en utilisant le nouveau contexte.\n"
+                    "2. **Répéter** la réponse originale si le nouveau contexte n'est pas utile.\n"
+                    "Ne faites jamais référence à la réponse ou au contexte original directement dans votre réponse.\n"
+                    "En cas de doute, contentez-vous de répéter la réponse originale."
+                    "Nouveau contexte: {context_msg}\n"
+                    "Requête: {query_str}\n"
+                    "Réponse originale: {existing_answer}\n"
+                    "Nouvelle réponse: "
+                ),
+                role=MessageRole.USER,
+            )
         ]
     else:
         CHAT_REFINE_PROMPT_TMPL_MSGS = [
-            HumanMessagePromptTemplate.from_template("{query_str}"),
-            AIMessagePromptTemplate.from_template("{existing_answer}"),
-            HumanMessagePromptTemplate.from_template(
-                "I have more context below which can be used "
-                "(only if needed) to update your previous answer.\n"
-                "------------\n"
-                "{context_msg}\n"
-                "------------\n"
-                "Given the new context, update the previous answer to better "
-                "answer my previous query."
-                "If the previous answer remains the same, repeat it verbatim. "
-                "Never reference the new context or my previous query directly.",
-            ),
+            ChatMessage(
+                content=(
+                    "You are an expert Q&A system that stricly operates in two modes"
+                    "when refining existing answers:\n"
+                    "1. **Rewrite** an original answer using the new context.\n"
+                    "2. **Repeat** the original answer if the new context isn't useful.\n"
+                    "Never reference the original answer or context directly in your answer.\n"
+                    "When in doubt, just repeat the original answer."
+                    "New Context: {context_msg}\n"
+                    "Query: {query_str}\n"
+                    "Original Answer: {existing_answer}\n"
+                    "New Answer: "
+                ),
+                role=MessageRole.USER,
+            )
         ]
-
-    CHAT_REFINE_PROMPT_LC = ChatPromptTemplate.from_messages(CHAT_REFINE_PROMPT_TMPL_MSGS)
-    return RefinePrompt.from_langchain_prompt(CHAT_REFINE_PROMPT_LC)
+    return ChatPromptTemplate(message_templates=CHAT_REFINE_PROMPT_TMPL_MSGS)

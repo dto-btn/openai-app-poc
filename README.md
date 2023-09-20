@@ -85,3 +85,7 @@ sudo apt install python3.11 python3.11-venv
 python3 -V
 ```
 
+## documentation
+
+* [Improve search using Azure Cognitive search index](https://gpt-index.readthedocs.io/en/latest/examples/vector_stores/CognitiveSearchIndexDemo.html#basic-example)
+
