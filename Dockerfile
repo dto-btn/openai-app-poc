@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.5
 
 ENV TZ="Canada/Eastern"
 
@@ -7,17 +7,12 @@ WORKDIR /app
 COPY requirements-freeze.txt requirements.txt
 
 RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
+# https://github.com/mindsdb/mindsdb/pull/7155
+RUN python3 -c 'import nltk; nltk.download("punkt"); nltk.download("stopwords");'
 
 COPY app/ ./app/
-
-RUN addgroup --gid 999 --system app && \
-    adduser --no-create-home --shell /bin/false --disabled-password --uid 1001 --system --group app && \
-    chown -R app /app
-
-#TODO: fix config since app user via llama_index needs to write to /usr/local
-USER app
 
 HEALTHCHECK CMD curl --fail http://localhost:5000 || exit 1
 EXPOSE 5000
 
-ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+ENTRYPOINT ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "app:app"]
