@@ -88,4 +88,5 @@ python3 -V
 ## documentation
 
 * [Improve search using Azure Cognitive search index](https://gpt-index.readthedocs.io/en/latest/examples/vector_stores/CognitiveSearchIndexDemo.html#basic-example)
+* Current debugging for timing: https://gpt-index.readthedocs.io/en/latest/examples/callbacks/LlamaDebugHandler.html
 
