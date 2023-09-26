@@ -10,12 +10,12 @@ RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
 
 COPY app/ ./app/
 
-RUN addgroup --gid 1001 --system app && \
+RUN addgroup --gid 999 --system app && \
     adduser --no-create-home --shell /bin/false --disabled-password --uid 1001 --system --group app && \
     chown -R app /app
 
 #TODO: fix config since app user via llama_index needs to write to /usr/local
-#USER app
+USER app
 
 HEALTHCHECK CMD curl --fail http://localhost:5000 || exit 1
 EXPOSE 5000
