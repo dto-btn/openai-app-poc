@@ -48,8 +48,7 @@ CORS(app)
 #storage_account_name = os.environ["STORAGE_ACCNT_NAME"]
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
-deployment_name         = os.environ["OPENAI_DEPLOYMENT_NAME"]
-_basepath               = "./container/"
+deployment_names         = [name.strip() for name in str.split(os.environ["OPENAI_DEPLOYMENT_NAME"], ",")]
 #openai_api_version      = "2023-03-15-preview" # this may change in the future
 openai_api_version      = "2023-07-01-preview"
 
@@ -74,18 +73,22 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 1
 
-_default_index_name = "2023-07-19"
+_default_index_name = os.getenv("INDEX_NAME", "2023-07-19")
 
+# indices are pre-loaded with the same model they will be queried with
+indices = {}
 '''
 Bootstrap function to pre-load the vector index(ices)
 '''
 def _bootstrapIndex():
-    start = time.time()
-    set_global_service_context(_get_service_context())
-    index = _get_index(index_name=_default_index_name)
-    end = time.time()
-    print("Took {} seconds to load.".format(end-start))
-    return index
+    for deployment_name in deployment_names:
+        start = time.time()
+        print("Loading up the index: {}... (with model: {})".format(_default_index_name, deployment_name))
+        set_global_service_context(_get_service_context(deployment_name))
+        indices[deployment_name] = _get_index(index_name=_default_index_name)
+        end = time.time()
+        print("Took {} seconds to load.".format(end-start))
+    set_global_service_context(None) # want to enforce people to set it properly
 
 @app.route("/health", methods=["GET"])
 def health(): 
@@ -98,11 +101,10 @@ def query():
     k = 2 # default
     temperature = 0.7 # default
     body = request.get_json(force=True)
-    debug = False
     lang = "en"
-    index_name = _default_index_name
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
     history = {'inputs': [], 'outputs': []}
+    response_mode = ResponseMode.TREE_SUMMARIZE
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -118,15 +120,25 @@ def query():
     if "k" in body:
         k = int(body["k"])
 
-    if "debug" in body:
-        debug = bool(body["debug"])
-
     if "pretty" in body:
         pretty = bool(body["pretty"])
 
     if "lang" in body:
         if str(body["lang"]) == "fr":
             lang = "fr"
+    if "response_mode" in body:
+        match body["response_mode"]: # else default to TREE_SUMARIZE
+            case ResponseMode.REFINE.value:
+                response_mode = ResponseMode.REFINE
+            case ResponseMode.COMPACT.value:
+                response_mode = ResponseMode.COMPACT
+            case ResponseMode.SIMPLE_SUMMARIZE.value:
+                response_mode = ResponseMode.SIMPLE_SUMMARIZE
+            case ResponseMode.ACCUMULATE.value:
+                response_mode = ResponseMode.ACCUMULATE
+            case ResponseMode.COMPACT_ACCUMULATE.value:
+                response_mode = ResponseMode.COMPACT_ACCUMULATE
+        print("using {} response mode".format(response_mode))
     
     if "chat_history" in body:
         # try and conver the chat history into a map
@@ -140,12 +152,24 @@ def query():
         except:
             print("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
+  
+    deployment_name = deployment_names[0]
+    index = indices[deployment_name]
+    if "model" in body:
+        model = body["model"]
+        print("Will try loading up index for model: {}".format(model))
+        try: 
+            index = indices[model]
+            deployment_name = model
+        except KeyError as ex:
+            print("unable to load model, will use default", ex)
+        
 
     start = time.time()
-    service_context = _get_service_context(temperature)
-    set_global_service_context(service_context)
+    service_context = _get_service_context(deployment_name, temperature)
+    set_global_service_context(service_context) # remove?
     end = time.time()
-    print("Service context set (took {} seconds)".format(end-start))
+    print("Service context set (took {} seconds). Using model: {}".format(end-start, deployment_name))
     
     query_bundle = query
 
@@ -163,7 +187,7 @@ def query():
     retriever = VectorIndexRetriever(index=index, similarity_top_k=k) # type: ignore
 
     # configure response synthesizer
-    response_synthesizer = get_response_synthesizer(response_mode=ResponseMode.TREE_SUMMARIZE)
+    response_synthesizer = get_response_synthesizer(response_mode=response_mode)
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
@@ -189,8 +213,8 @@ def query():
             'chat_history': str(history_enc, 'utf-8')
         }
 
-    for data in r.keys():
-        print(f"{data}: {r[data]}")
+    #for data in r.keys():
+    #    print(f"{data}: {r[data]}")
 
     return jsonify(r)
 
@@ -200,14 +224,13 @@ Loads a Vector Index from the local filesystem
 
 """    
 def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
-    print("Loading up the index: {}...".format(index_name))
     storage_context = StorageContext.from_defaults(persist_dir=os.path.join(storage_location, index_name))
     # index needs to be recreated its missing metadata for this code to work properly.
     #vector_store = SimpleVectorStore.from_persist_dir(persist_dir=os.path.join(storage_location, index_name))
     #return VectorStoreIndex.from_vector_store(vector_store=vector_store)
     return load_index_from_storage(storage_context)
 
-def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
+def _get_service_context(model: str, temperature: float = 0.7) -> "ServiceContext":
     # Define prompt helper
     context_window = 4096
     num_output = 800 #hard limit
@@ -215,9 +238,8 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
     chunk_overlap_ratio = 0.1 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = _get_llm(temperature)
+    llm = _get_llm(model, temperature)
 
-    logging.info(llm)
     llm_predictor = _get_llm_predictor(llm)
 
     prompt_helper = PromptHelper(context_window=context_window, num_output=num_output, chunk_overlap_ratio=chunk_overlap_ratio,)
@@ -238,9 +260,9 @@ def _get_service_context(temperature: float = 0.7) -> "ServiceContext":
 
     return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, callback_manager=callback_manager)
 
-def _get_llm(temperature: float = 0.7):
-    return AzureChatOpenAI(model=deployment_name, 
-                           deployment_name=deployment_name,
+def _get_llm(model: str, temperature: float = 0.7):
+    return AzureChatOpenAI(model=model, 
+                           deployment_name=model,
                            temperature=temperature,)
 
 def _get_llm_predictor(llm) -> LLMPredictor:
@@ -331,4 +353,4 @@ def _has_history(history: dict) -> bool:
     return False
 
 # bootstrap
-index = _bootstrapIndex()
+_bootstrapIndex()
