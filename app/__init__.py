@@ -221,8 +221,8 @@ def query():
             'chat_history': str(history_enc, 'utf-8')
         }
 
-    #for data in r.keys():
-    #    print(f"{data}: {r[data]}")
+    print(f"[QUERY]: {r['query']}")
+    print(f"[ANSWER]:{r['answer']}")
 
     return jsonify(r)
 
