@@ -48,7 +48,13 @@ CORS(app)
 #storage_account_name = os.environ["STORAGE_ACCNT_NAME"]
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
-deployment_names         = [name.strip() for name in str.split(os.environ["OPENAI_DEPLOYMENT_NAME"], ",")]
+#deployment_names         = [name.strip() for name in str.split(os.environ["OPENAI_DEPLOYMENT_NAME"], ",")]
+
+models = {
+    "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
+    "gpt-35-turbo-16k": {"name": "gpt-35-turbo-16k", "context_window": 16384, "index": {} }
+}
+
 #openai_api_version      = "2023-03-15-preview" # this may change in the future
 openai_api_version      = "2023-07-01-preview"
 
@@ -75,17 +81,17 @@ _max_embeddings_history = 1
 
 _default_index_name = os.getenv("INDEX_NAME", "2023-07-19")
 
-# indices are pre-loaded with the same model they will be queried with
-indices = {}
+
 '''
 Bootstrap function to pre-load the vector index(ices)
 '''
 def _bootstrapIndex():
-    for deployment_name in deployment_names:
+    for model in models.values():
         start = time.time()
-        print("Loading up the index: {}... (with model: {})".format(_default_index_name, deployment_name))
-        set_global_service_context(_get_service_context(deployment_name))
-        indices[deployment_name] = _get_index(index_name=_default_index_name)
+        print("Loading up the index: {}... (with model: {})".format(_default_index_name, model))
+        set_global_service_context(_get_service_context(model["name"], model["context_window"]))
+        # indices are pre-loaded with the same model they will be queried with
+        model["index"] = _get_index(index_name=_default_index_name)
         end = time.time()
         print("Took {} seconds to load.".format(end-start))
     set_global_service_context(None) # want to enforce people to set it properly
@@ -105,6 +111,8 @@ def query():
     pretty = False # wether or not to pretty print medatada, used for the MS Teams chatbot ..
     history = {'inputs': [], 'outputs': []}
     response_mode = ResponseMode.TREE_SUMMARIZE
+    model_data = {}
+    num_output = 800
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -119,6 +127,9 @@ def query():
 
     if "k" in body:
         k = int(body["k"])
+
+    if "num_output" in body:
+        num_output = int(body["num_output"])
 
     if "pretty" in body:
         pretty = bool(body["pretty"])
@@ -152,24 +163,21 @@ def query():
         except:
             print("Unable to convert chat_history to a proper map that contains input and outputs..")
             history = {'inputs': [], 'outputs': []}
-  
-    deployment_name = deployment_names[0]
-    index = indices[deployment_name]
+
     if "model" in body:
         model = body["model"]
-        print("Will try loading up index for model: {}".format(model))
+        print("Loading up data for model: {}".format(model))
         try: 
-            index = indices[model]
-            deployment_name = model
+            model_data = models[model]
         except KeyError as ex:
             print("unable to load model, will use default", ex)
+            return jsonify({"error": str(ex)}), 500
         
-
     start = time.time()
-    service_context = _get_service_context(deployment_name, temperature)
-    set_global_service_context(service_context) # remove?
+    service_context = _get_service_context(model_data["name"], model_data["context_window"], temperature, num_output)
+    #set_global_service_context(service_context) # remove?
     end = time.time()
-    print("Service context set (took {} seconds). Using model: {}".format(end-start, deployment_name))
+    print("Service context set (took {} seconds). Using model: {}".format(end-start, model_data["name"]))
     
     query_bundle = query
 
@@ -184,10 +192,10 @@ def query():
     else:
         text_qa_template=get_prompt_template(lang)
 
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=k) # type: ignore
+    retriever = VectorIndexRetriever(index=model_data["index"], similarity_top_k=k) # type: ignore
 
     # configure response synthesizer
-    response_synthesizer = get_response_synthesizer(response_mode=response_mode)
+    response_synthesizer = get_response_synthesizer(response_mode=response_mode, service_context=service_context)
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
@@ -230,11 +238,7 @@ def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
     #return VectorStoreIndex.from_vector_store(vector_store=vector_store)
     return load_index_from_storage(storage_context)
 
-def _get_service_context(model: str, temperature: float = 0.7) -> "ServiceContext":
-    # Define prompt helper
-    context_window = 4096
-    num_output = 800 #hard limit
-    chunk_size_limit = 1000 # token window size per document
+def _get_service_context(model: str, context_window: int, temperature: float = 0.7, num_output: int = 800) -> "ServiceContext":
     chunk_overlap_ratio = 0.1 # overlap for each token fragment
 
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
