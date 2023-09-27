@@ -177,7 +177,7 @@ def query():
     service_context = _get_service_context(model_data["name"], model_data["context_window"], temperature, num_output)
     #set_global_service_context(service_context) # remove?
     end = time.time()
-    print("Service context set (took {} seconds). Using model: {}".format(end-start, model_data["name"]))
+    print("Service context set (took {} seconds). model={}, context_window={}, num_output={}".format(end-start, model_data["name"], model_data["context_window"], num_output))
     
     query_bundle = query
 
