@@ -79,8 +79,7 @@ And we will keep the embedding chat history to a minimum (and we also restrict i
 _max_history = 5
 _max_embeddings_history = 1
 
-_default_index_name = os.getenv("INDEX_NAME", "2023-07-19")
-
+_default_index_name = os.getenv("INDEX_NAME", "2023-10-18")
 
 '''
 Bootstrap function to pre-load the vector index(ices)
@@ -118,9 +117,6 @@ def query():
         return jsonify({"error":"Request body must contain a query."}), 400
     else:
         query = body["query"]
-
-    if "index" in body:
-        index_name = body["index"]
            
     if "temp" in body:
         temperature = float(body["temp"])
