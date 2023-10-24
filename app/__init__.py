@@ -40,6 +40,9 @@ from llama_index.callbacks import CallbackManager, LlamaDebugHandler, CBEventTyp
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
 
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
+
 load_dotenv()
 
 app = Flask(__name__)
