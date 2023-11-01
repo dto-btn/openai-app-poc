@@ -48,17 +48,13 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-#storage_account_name = os.environ["STORAGE_ACCNT_NAME"]
 key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
-#deployment_names         = [name.strip() for name in str.split(os.environ["OPENAI_DEPLOYMENT_NAME"], ",")]
 
 models = {
     "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
-    "gpt-35-turbo-16k": {"name": "gpt-35-turbo-16k", "context_window": 16384, "index": {} }
 }
 
-#openai_api_version      = "2023-03-15-preview" # this may change in the future
 openai_api_version      = "2023-07-01-preview"
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
@@ -101,6 +97,60 @@ def _bootstrapIndex():
 @app.route("/health", methods=["GET"])
 def health(): 
     return jsonify({"msg":"Healthy"})
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    """
+    Send a question to GPT directly along with your context prompt
+    """
+    data = request.get_json()
+
+    query = data.get('query')
+    prompt = data.get('prompt')
+    temp = data.get('temp', 0.7)
+    tokens = data.get('token', 800)
+    history = data.get('history', [])
+    past_msg_incl = data.get('past_msg_incl', 10)
+
+    '''minimal validation'''
+    if not isinstance(history, list):
+        return jsonify({"error":"history must be a list of dictionaries"}), 400
+    if not query:
+        return jsonify({"error":"Request body must contain a query"}), 400
+    if not prompt and not history:
+        return jsonify({"error":"Request body must contain at least a prompt or an history"}), 400
+    if past_msg_incl > 20:
+        past_msg_incl = 20
+
+    # if we have an history (and no prompt) ... use it, else reset history so to speak to force new prompt
+    # kiss principle here and the goal is to mimick what they do on the Azure OpenAI playground right now for simplicy
+    if history and not prompt:
+        history.append({"role":"user", "content":query})
+        # truncate history if needed (and keep the first item in the list since it contains the prompt set)
+        if len(history) > past_msg_incl:
+            history = [history[0]] + history[-(past_msg_incl-1):]
+    else:
+       history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
+
+    response = openai.ChatCompletion.create(
+        engine="gpt-4",
+        messages = history,
+        temperature=temp,
+        max_tokens=tokens,
+        top_p=0.95,
+        frequency_penalty=0,
+        presence_penalty=0,
+        stop=None)
+
+    # Ensure response is a dictionary and add history to it
+    if not isinstance(response, dict):
+        response = response.__dict__
+
+    r = dict(response["choices"][0]["message"])
+    history.append(r)
+    response['history'] = history
+
+    return jsonify(response)
 
 @app.route("/query", methods=["POST"])
 def query():
