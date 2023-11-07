@@ -1,6 +1,5 @@
-import ast
 import base64
-import json
+import json  # bourne
 import logging
 import logging.handlers
 import os
@@ -11,21 +10,15 @@ from typing import List
 import openai
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
-from azure.storage.blob import BlobServiceClient
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from langchain.chains.conversation.memory import ConversationBufferMemory
 from langchain.chat_models import AzureChatOpenAI
 from langchain.embeddings import OpenAIEmbeddings
 from llama_index import (GPTListIndex, LangchainEmbedding, PromptHelper,
-                         QueryBundle, ServiceContext, SimpleDirectoryReader,
-                         StorageContext, VectorStoreIndex,
+                         QueryBundle, ServiceContext, StorageContext,
                          load_index_from_storage, set_global_service_context)
-from llama_index.indices.base import BaseIndex
-from llama_index.indices.composability import ComposableGraph
-from llama_index.indices.postprocessor import SimilarityPostprocessor
+from llama_index.callbacks import CallbackManager, LlamaDebugHandler
 from llama_index.llm_predictor import LLMPredictor
 from llama_index.query_engine import RetrieverQueryEngine
 from llama_index.response.schema import RESPONSE_TYPE
@@ -33,9 +26,6 @@ from llama_index.response_synthesizers import get_response_synthesizer
 from llama_index.response_synthesizers.type import ResponseMode
 from llama_index.retrievers import VectorIndexRetriever
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
-from llama_index.vector_stores import SimpleVectorStore
-from llama_index.vector_stores.types import VectorStore
-from llama_index.callbacks import CallbackManager, LlamaDebugHandler, CBEventType
 
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
@@ -112,6 +102,8 @@ def chat():
     history = data.get('history', [])
     past_msg_incl = data.get('past_msg_incl', 10)
 
+    print(f"[QUERY] {query}")
+
     '''minimal validation'''
     if not isinstance(history, list):
         return jsonify({"error":"history must be a list of dictionaries"}), 400
@@ -128,7 +120,8 @@ def chat():
         history.append({"role":"user", "content":query})
         # truncate history if needed (and keep the first item in the list since it contains the prompt set)
         if len(history) > past_msg_incl:
-            history = [history[0]] + history[-(past_msg_incl-1):]
+            history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
+
     else:
        history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
 
@@ -147,6 +140,7 @@ def chat():
         response = response.__dict__
 
     r = dict(response["choices"][0]["message"])
+    print(f"[ANSWER] {r}")
     history.append(r)
     response['history'] = history
 
@@ -170,7 +164,7 @@ def query():
         return jsonify({"error":"Request body must contain a query."}), 400
     else:
         query = body["query"]
-           
+
     if "temp" in body:
         temperature = float(body["temp"])
 
@@ -199,7 +193,7 @@ def query():
             case ResponseMode.COMPACT_ACCUMULATE.value:
                 response_mode = ResponseMode.COMPACT_ACCUMULATE
         print("using {} response mode".format(response_mode))
-    
+
     if "chat_history" in body:
         # try and conver the chat history into a map
         try:
@@ -221,13 +215,13 @@ def query():
         except KeyError as ex:
             print("unable to load model, will use default", ex)
             return jsonify({"error": str(ex)}), 500
-        
+
     start = time.time()
     service_context = _get_service_context(model_data["name"], model_data["context_window"], temperature, num_output)
     #set_global_service_context(service_context) # remove?
     end = time.time()
     print("Service context set (took {} seconds). model={}, context_window={}, num_output={}".format(end-start, model_data["name"], model_data["context_window"], num_output))
-    
+
     query_bundle = query
 
     #prompt building, and query bundle
@@ -279,7 +273,7 @@ def query():
 
 Loads a Vector Index from the local filesystem
 
-"""    
+"""
 def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
     storage_context = StorageContext.from_defaults(persist_dir=os.path.join(storage_location, index_name))
     # index needs to be recreated its missing metadata for this code to work properly.
@@ -307,7 +301,7 @@ def _get_service_context(model: str, context_window: int, temperature: float = 0
             openai_api_type=openai.api_type,
             openai_api_version=openai.api_version),
             embed_batch_size=1)
-    
+
     llama_debug = LlamaDebugHandler(print_trace_on_end=True)
     callback_manager = CallbackManager([llama_debug])
 
@@ -359,13 +353,13 @@ def _update_chat_history(history: dict, query: str, response: str, lang: str) ->
         print("history is too big, truncating ..")
         history['inputs'].pop(0)
         history['outputs'].pop(0)
-         
+
     history['inputs'].append(human_prefix + query)
     history['outputs'].append(ai_prefix + response)
 
     return history
 
-def _history_as_str(history: dict) -> str: 
+def _history_as_str(history: dict) -> str:
     inputs = history['inputs']
     outputs = history['outputs']
 
@@ -381,20 +375,20 @@ def _history_as_str(history: dict) -> str:
 This one just returns a list of the outputs for the embeddings search. 
 Since the question asked by the user might refer to previous anwser
 '''
-def _get_history_embeddings(history: dict) -> List[str]: 
+def _get_history_embeddings(history: dict) -> List[str]:
     inputs = history['inputs']
     outputs = history['outputs']
     size = len(inputs) - 1
     if not inputs:
-        return [""]  
-    
+        return [""]
+
     history_list = []
     # get last n items of that list
     for i in range(_max_embeddings_history):
         history_list.append(inputs[size-i] + "\n" + outputs[size-i] + "\n")
         #history_list.append(outputs[size-i])
         print(f"history added is  {history_list}")
-    
+
     return history_list
 
 """
