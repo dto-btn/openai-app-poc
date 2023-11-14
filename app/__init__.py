@@ -7,14 +7,14 @@ import sys
 import time
 from typing import List
 
-import openai
+from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from langchain.chat_models import AzureChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings
+from langchain.embeddings import AzureOpenAIEmbeddings
 from llama_index import (GPTListIndex, LangchainEmbedding, PromptHelper,
                          QueryBundle, ServiceContext, StorageContext,
                          load_index_from_storage, set_global_service_context)
@@ -29,6 +29,8 @@ from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
+
+from IPython.display import Markdown, display
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -45,20 +47,20 @@ models = {
     "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
 }
 
-openai_api_version      = "2023-07-01-preview"
-
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
 azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
 
 credential  = DefaultAzureCredential()
 client      = SecretClient(vault_url=kv_uri, credential=credential)
+api_key     = client.get_secret(os.getenv("OPENAI_KEY_NAME", "AzureOpenAIKey")).value
+api_version = "2023-07-01-preview"
 
-openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
-openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
-openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
-azure_openai_key   = client.get_secret(os.getenv("OPENAI_KEY_NAME", "AzureOpenAIKey")).value
-if azure_openai_key is not None:
-    openai.api_key = os.environ["OPENAI_API_KEY"] = azure_openai_key
+client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=azure_openai_uri,
+    api_key=api_key
+)
+
 
 '''
 Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, seems big enough. 
@@ -125,9 +127,9 @@ def chat():
     else:
        history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
 
-    response = openai.ChatCompletion.create(
-        engine="gpt-4",
-        messages = history,
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages = history, # type: ignore
         temperature=temp,
         max_tokens=tokens,
         top_p=0.95,
@@ -135,16 +137,22 @@ def chat():
         presence_penalty=0,
         stop=None)
 
-    # Ensure response is a dictionary and add history to it
-    if not isinstance(response, dict):
-        response = response.__dict__
+    content = response.choices[0].message.content
+    role = response.choices[0].message.role
+    print(f"[ANSWER] {content} (role: {role})")
 
-    r = dict(response["choices"][0]["message"])
-    print(f"[ANSWER] {r}")
-    history.append(r)
-    response['history'] = history
+    r = {'message': [], 'created': '', 'history': [], 'id': '', 'model': '', 'object': '', 'usage': {'completion_tokens': int, 'prompt_tokens': int, 'total_tokens': int}}
 
-    return jsonify(response)
+    r['id'] = response.id
+    r['message'] = {"role": role,"content": content}
+    history.append(r['message'])
+    r['history'] = history
+    r['created'] = response.created
+    r['model'] = response.model
+    if response.usage is not None:
+        r['usage'] = {'completion_tokens': response.usage.completion_tokens, 'prompt_tokens': response.usage.prompt_tokens, 'total_tokens': response.usage.total_tokens}
+
+    return jsonify(r)
 
 @app.route("/query", methods=["POST"])
 def query():
@@ -228,10 +236,10 @@ def query():
     if _has_history(history):
         print("using chat history for prompt and query")
         text_qa_template=get_chat_prompt_template(lang, _history_as_str(history))
-        query_bundle = QueryBundle(
-            query,
-            custom_embedding_strs=_get_history_embeddings(history)
-        )
+        #query_bundle = QueryBundle(
+        #    query,
+        #    custom_embedding_strs=_get_history_embeddings(history)
+        #)
     else:
         text_qa_template=get_prompt_template(lang)
 
@@ -249,6 +257,9 @@ def query():
         refine_template=get_refined_prompt(lang),
         verbose=True
     )
+
+    prompts_dict = query_engine.get_prompts()
+    _display_prompt_dict(prompts_dict)
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -269,12 +280,10 @@ def query():
 
     return jsonify(r)
 
-"""
-
-Loads a Vector Index from the local filesystem
-
-"""
 def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
+    """
+    Loads a Vector Index from the local filesystem
+    """
     storage_context = StorageContext.from_defaults(persist_dir=os.path.join(storage_location, index_name))
     # index needs to be recreated its missing metadata for this code to work properly.
     #vector_store = SimpleVectorStore.from_persist_dir(persist_dir=os.path.join(storage_location, index_name))
@@ -293,14 +302,9 @@ def _get_service_context(model: str, context_window: int, temperature: float = 0
 
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
-        OpenAIEmbeddings(
-            model="text-embedding-ada-002", 
-            deployment="text-embedding-ada-002", 
-            openai_api_key=openai.api_key,
-            openai_api_base=openai.api_base,
-            openai_api_type=openai.api_type,
-            openai_api_version=openai.api_version),
-            embed_batch_size=1)
+        AzureOpenAIEmbeddings(
+            model="text-embedding-ada-002", api_key=api_key, base_url=azure_openai_uri),
+            embed_batch_size=1,)
 
     llama_debug = LlamaDebugHandler(print_trace_on_end=True)
     callback_manager = CallbackManager([llama_debug])
@@ -308,9 +312,8 @@ def _get_service_context(model: str, context_window: int, temperature: float = 0
     return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, callback_manager=callback_manager)
 
 def _get_llm(model: str, temperature: float = 0.7):
-    return AzureChatOpenAI(model=model, 
-                           deployment_name=model,
-                           temperature=temperature,)
+    return AzureChatOpenAI(model=model,
+                           temperature=temperature,api_key=api_key, api_version=api_version, azure_endpoint=azure_openai_uri)
 
 def _get_llm_predictor(llm) -> LLMPredictor:
     return LLMPredictor(llm=llm,)
@@ -371,11 +374,12 @@ def _history_as_str(history: dict) -> str:
 
     return history_str
 
-'''
-This one just returns a list of the outputs for the embeddings search. 
-Since the question asked by the user might refer to previous anwser
-'''
+
 def _get_history_embeddings(history: dict) -> List[str]:
+    """
+    This one just returns a list of the outputs for the embeddings search. 
+    Since the question asked by the user might refer to previous anwser
+    """
     inputs = history['inputs']
     outputs = history['outputs']
     size = len(inputs) - 1
@@ -391,13 +395,21 @@ def _get_history_embeddings(history: dict) -> List[str]:
 
     return history_list
 
-"""
-Check if the history map has 0 outputs and outputs
-"""
 def _has_history(history: dict) -> bool:
+    """
+    Check if the history map has 0 outputs and outputs
+    """
     if len(history['inputs']) > 0 and len(history['outputs']) > 0:
         return True
     return False
+
+# define prompt viewing function
+def _display_prompt_dict(prompts_dict):
+    for k, p in prompts_dict.items():
+        text_md = f"**Prompt Key**: {k}<br>" f"**Text:** <br>"
+        display(Markdown(text_md))
+        print(p.get_template())
+        display(Markdown("<br><br>"))
 
 # bootstrap
 _bootstrapIndex()

@@ -9,3 +9,4 @@ llama-index
 openai
 python-dotenv
 bs4
+IPython
