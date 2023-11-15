@@ -5,7 +5,7 @@ import logging.handlers
 import os
 import sys
 import time
-from typing import List
+from typing import Dict, List, Optional, Union
 
 from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
@@ -29,8 +29,6 @@ from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
 
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
-
-from IPython.display import Markdown, display
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
@@ -106,51 +104,7 @@ def chat():
 
     print(f"[QUERY] {query}")
 
-    '''minimal validation'''
-    if not isinstance(history, list):
-        return jsonify({"error":"history must be a list of dictionaries"}), 400
-    if not query:
-        return jsonify({"error":"Request body must contain a query"}), 400
-    if not prompt and not history:
-        return jsonify({"error":"Request body must contain at least a prompt or an history"}), 400
-    if past_msg_incl > 20:
-        past_msg_incl = 20
-
-    # if we have an history (and no prompt) ... use it, else reset history so to speak to force new prompt
-    # kiss principle here and the goal is to mimick what they do on the Azure OpenAI playground right now for simplicy
-    if history and not prompt:
-        history.append({"role":"user", "content":query})
-        # truncate history if needed (and keep the first item in the list since it contains the prompt set)
-        if len(history) > past_msg_incl:
-            history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
-
-    else:
-       history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
-
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages = history, # type: ignore
-        temperature=temp,
-        max_tokens=tokens,
-        top_p=0.95,
-        frequency_penalty=0,
-        presence_penalty=0,
-        stop=None)
-
-    content = response.choices[0].message.content
-    role = response.choices[0].message.role
-    print(f"[ANSWER] {content} (role: {role})")
-
-    r = {'message': [], 'created': '', 'history': [], 'id': '', 'model': '', 'object': '', 'usage': {'completion_tokens': int, 'prompt_tokens': int, 'total_tokens': int}}
-
-    r['id'] = response.id
-    r['message'] = {"role": role,"content": content}
-    history.append(r['message'])
-    r['history'] = history
-    r['created'] = response.created
-    r['model'] = response.model
-    if response.usage is not None:
-        r['usage'] = {'completion_tokens': response.usage.completion_tokens, 'prompt_tokens': response.usage.prompt_tokens, 'total_tokens': response.usage.total_tokens}
+    r = _generate_response(query, prompt=prompt, temp=temp, tokens=tokens, history=history, past_msg_incl=past_msg_incl)
 
     return jsonify(r)
 
@@ -259,7 +213,7 @@ def query():
     )
 
     prompts_dict = query_engine.get_prompts()
-    _display_prompt_dict(prompts_dict)
+    print(prompts_dict)
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -303,7 +257,7 @@ def _get_service_context(model: str, context_window: int, temperature: float = 0
     # limit is chunk size 1 atm
     embedding_llm = LangchainEmbedding(
         AzureOpenAIEmbeddings(
-            model="text-embedding-ada-002", api_key=api_key, base_url=azure_openai_uri),
+            model="text-embedding-ada-002", api_key=api_key, azure_endpoint=azure_openai_uri),
             embed_batch_size=1,)
 
     llama_debug = LlamaDebugHandler(print_trace_on_end=True)
@@ -403,13 +357,53 @@ def _has_history(history: dict) -> bool:
         return True
     return False
 
-# define prompt viewing function
-def _display_prompt_dict(prompts_dict):
-    for k, p in prompts_dict.items():
-        text_md = f"**Prompt Key**: {k}<br>" f"**Text:** <br>"
-        display(Markdown(text_md))
-        print(p.get_template())
-        display(Markdown("<br><br>"))
+def _generate_response(query: str, prompt: str, temp: float, tokens: int, history: List[Dict[str, str]], past_msg_incl: int) -> Union[Dict, tuple]:
+
+    '''minimal validation'''
+    if not isinstance(history, list):
+        return jsonify({"error":"history must be a list of dictionaries"}), 400
+    if not query:
+        return jsonify({"error":"Request body must contain a query"}), 400
+    if not prompt and not history:
+        return jsonify({"error":"Request body must contain at least a prompt or an history"}), 400
+    if past_msg_incl > 20:
+        past_msg_incl = 20
+
+    # if we have an history (and no prompt) ... use it, else reset history so to speak to force new prompt
+    # kiss principle here and the goal is to mimick what they do on the Azure OpenAI playground right now for simplicy
+    if history and not prompt:
+        history.append({"role":"user", "content":query})
+        # truncate history if needed (and keep the first item in the list since it contains the prompt set)
+        if len(history) > past_msg_incl:
+            history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
+    else:
+       history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages = history, # type: ignore
+        temperature=temp,
+        max_tokens=tokens,
+        top_p=0.95,
+        frequency_penalty=0,
+        presence_penalty=0,
+        stop=None)
+
+    content = response.choices[0].message.content
+    role = response.choices[0].message.role
+    print(f"[ANSWER] {content} (role: {role})")
+
+    r = {'message': [], 'created': '', 'history': [], 'id': '', 'model': '', 'object': '', 'usage': {'completion_tokens': int, 'prompt_tokens': int, 'total_tokens': int}}
+
+    r['id'] = response.id
+    r['message'] = {"role": role,"content": content}
+    history.append(r['message'])
+    r['history'] = history
+    r['created'] = response.created
+    r['model'] = response.model
+    if response.usage is not None:
+        r['usage'] = {'completion_tokens': response.usage.completion_tokens, 'prompt_tokens': response.usage.prompt_tokens, 'total_tokens': response.usage.total_tokens}
+    return r
 
 # bootstrap
 _bootstrapIndex()
