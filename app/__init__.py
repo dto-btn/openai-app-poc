@@ -5,17 +5,17 @@ import logging.handlers
 import os
 import sys
 import time
-from typing import List
+from typing import Dict, List, Optional, Union
 
-import openai
+from openai import AzureOpenAI
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from langchain.chat_models import AzureChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings
-from llama_index import (GPTListIndex, LangchainEmbedding, PromptHelper,
+from langchain.embeddings import AzureOpenAIEmbeddings
+from llama_index import (GPTListIndex, PromptHelper,
                          QueryBundle, ServiceContext, StorageContext,
                          load_index_from_storage, set_global_service_context)
 from llama_index.callbacks import CallbackManager, LlamaDebugHandler
@@ -26,6 +26,11 @@ from llama_index.response_synthesizers import get_response_synthesizer
 from llama_index.response_synthesizers.type import ResponseMode
 from llama_index.retrievers import VectorIndexRetriever
 from llama_index.storage.storage_context import DEFAULT_PERSIST_DIR
+from llama_index.prompts.default_prompt_selectors import (
+    DEFAULT_REFINE_PROMPT_SEL,
+    DEFAULT_TEXT_QA_PROMPT_SEL,
+    DEFAULT_TREE_SUMMARIZE_PROMPT_SEL,
+)
 
 from app.prompts.qna import (get_chat_prompt_template, get_prompt_template,
                              get_refined_prompt)
@@ -45,20 +50,20 @@ models = {
     "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
 }
 
-openai_api_version      = "2023-07-01-preview"
-
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
 azure_openai_uri    = f"https://{openai_endpoint_name}.openai.azure.com"
 
 credential  = DefaultAzureCredential()
 client      = SecretClient(vault_url=kv_uri, credential=credential)
+api_key     = client.get_secret(os.getenv("OPENAI_KEY_NAME", "AzureOpenAIKey")).value
+api_version = "2023-07-01-preview"
 
-openai.api_type    = os.environ["OPENAI_API_TYPE"]    = 'azure'
-openai.api_base    = os.environ["OPENAI_API_BASE"]    = azure_openai_uri
-openai.api_version = os.environ["OPENAI_API_VERSION"] = openai_api_version
-azure_openai_key   = client.get_secret(os.getenv("OPENAI_KEY_NAME", "AzureOpenAIKey")).value
-if azure_openai_key is not None:
-    openai.api_key = os.environ["OPENAI_API_KEY"] = azure_openai_key
+client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=azure_openai_uri,
+    api_key=api_key
+)
+
 
 '''
 Keeping the chat history for the context (what is sent to ChatGPT 3.5) to 5, seems big enough. 
@@ -102,49 +107,9 @@ def chat():
     history = data.get('history', [])
     past_msg_incl = data.get('past_msg_incl', 10)
 
-    print(f"[QUERY] {query}")
+    r = _generate_response(query, prompt=prompt, temp=temp, tokens=tokens, history=history, past_msg_incl=past_msg_incl)
 
-    '''minimal validation'''
-    if not isinstance(history, list):
-        return jsonify({"error":"history must be a list of dictionaries"}), 400
-    if not query:
-        return jsonify({"error":"Request body must contain a query"}), 400
-    if not prompt and not history:
-        return jsonify({"error":"Request body must contain at least a prompt or an history"}), 400
-    if past_msg_incl > 20:
-        past_msg_incl = 20
-
-    # if we have an history (and no prompt) ... use it, else reset history so to speak to force new prompt
-    # kiss principle here and the goal is to mimick what they do on the Azure OpenAI playground right now for simplicy
-    if history and not prompt:
-        history.append({"role":"user", "content":query})
-        # truncate history if needed (and keep the first item in the list since it contains the prompt set)
-        if len(history) > past_msg_incl:
-            history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
-
-    else:
-       history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
-
-    response = openai.ChatCompletion.create(
-        engine="gpt-4",
-        messages = history,
-        temperature=temp,
-        max_tokens=tokens,
-        top_p=0.95,
-        frequency_penalty=0,
-        presence_penalty=0,
-        stop=None)
-
-    # Ensure response is a dictionary and add history to it
-    if not isinstance(response, dict):
-        response = response.__dict__
-
-    r = dict(response["choices"][0]["message"])
-    print(f"[ANSWER] {r}")
-    history.append(r)
-    response['history'] = history
-
-    return jsonify(response)
+    return jsonify(r)
 
 @app.route("/query", methods=["POST"])
 def query():
@@ -216,12 +181,7 @@ def query():
             print("unable to load model, will use default", ex)
             return jsonify({"error": str(ex)}), 500
 
-    start = time.time()
-    service_context = _get_service_context(model_data["name"], model_data["context_window"], temperature, num_output)
-    #set_global_service_context(service_context) # remove?
-    end = time.time()
-    print("Service context set (took {} seconds). model={}, context_window={}, num_output={}".format(end-start, model_data["name"], model_data["context_window"], num_output))
-
+    service_context = _get_service_context(model=model_data["name"], context_window=model_data["context_window"], temperature=temperature, num_output=num_output)
     query_bundle = query
 
     #prompt building, and query bundle
@@ -238,15 +198,21 @@ def query():
     retriever = VectorIndexRetriever(index=model_data["index"], similarity_top_k=k) # type: ignore
 
     # configure response synthesizer
-    response_synthesizer = get_response_synthesizer(response_mode=response_mode, service_context=service_context)
+    response_synthesizer = get_response_synthesizer(response_mode=response_mode, 
+                                                    service_context=service_context,
+                                                    #TODO: fix the prompt templates localisation
+                                                    # https://docs.llamaindex.ai/en/stable/examples/prompts/advanced_prompts.html
+                                                    #text_qa_template=text_qa_template,
+                                                    #summary_template=DEFAULT_TREE_SUMMARIZE_PROMPT_SEL,
+                                                    #simple_template=text_qa_template,
+                                                    #refine_template=text_qa_template,
+                                                    )
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=text_qa_template,
-        refine_template=get_refined_prompt(lang),
         verbose=True
     )
 
@@ -264,53 +230,40 @@ def query():
             'chat_history': str(history_enc, 'utf-8')
         }
 
-    print(f"[QUERY]: {r['query']}")
-    print(f"[ANSWER]:{r['answer']}")
-
+    logging.info(f"[QUERY]: {r['query']} [ANSWER]:{r['answer']}")
     return jsonify(r)
 
-"""
-
-Loads a Vector Index from the local filesystem
-
-"""
 def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
+    """
+    Loads a Vector Index from the local filesystem
+    """
     storage_context = StorageContext.from_defaults(persist_dir=os.path.join(storage_location, index_name))
     # index needs to be recreated its missing metadata for this code to work properly.
     #vector_store = SimpleVectorStore.from_persist_dir(persist_dir=os.path.join(storage_location, index_name))
     #return VectorStoreIndex.from_vector_store(vector_store=vector_store)
     return load_index_from_storage(storage_context)
 
-def _get_service_context(model: str, context_window: int, temperature: float = 0.7, num_output: int = 800) -> "ServiceContext":
-    chunk_overlap_ratio = 0.1 # overlap for each token fragment
-
+def _get_service_context(model: str, context_window: int, num_output: int = 800, temperature: float = 0.7,) -> "ServiceContext":
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
     llm = _get_llm(model, temperature)
 
     llm_predictor = _get_llm_predictor(llm)
 
+    chunk_overlap_ratio = 0.1 # overlap for each token fragment
     prompt_helper = PromptHelper(context_window=context_window, num_output=num_output, chunk_overlap_ratio=chunk_overlap_ratio,)
 
     # limit is chunk size 1 atm
-    embedding_llm = LangchainEmbedding(
-        OpenAIEmbeddings(
-            model="text-embedding-ada-002", 
-            deployment="text-embedding-ada-002", 
-            openai_api_key=openai.api_key,
-            openai_api_base=openai.api_base,
-            openai_api_type=openai.api_type,
-            openai_api_version=openai.api_version),
-            embed_batch_size=1)
+    embedding_llm = AzureOpenAIEmbeddings(
+            model="text-embedding-ada-002", api_key=api_key, azure_endpoint=azure_openai_uri)
 
     llama_debug = LlamaDebugHandler(print_trace_on_end=True)
     callback_manager = CallbackManager([llama_debug])
 
-    return ServiceContext.from_defaults(llm_predictor=llm_predictor, prompt_helper=prompt_helper, embed_model=embedding_llm, callback_manager=callback_manager)
+    return ServiceContext.from_defaults(llm_predictor=llm_predictor, embed_model=embedding_llm, callback_manager=callback_manager, prompt_helper=prompt_helper)
 
 def _get_llm(model: str, temperature: float = 0.7):
-    return AzureChatOpenAI(model=model, 
-                           deployment_name=model,
-                           temperature=temperature,)
+    return AzureChatOpenAI(model=model,
+                           temperature=temperature,api_key=api_key, api_version=api_version, azure_endpoint=azure_openai_uri)
 
 def _get_llm_predictor(llm) -> LLMPredictor:
     return LLMPredictor(llm=llm,)
@@ -371,11 +324,12 @@ def _history_as_str(history: dict) -> str:
 
     return history_str
 
-'''
-This one just returns a list of the outputs for the embeddings search. 
-Since the question asked by the user might refer to previous anwser
-'''
+
 def _get_history_embeddings(history: dict) -> List[str]:
+    """
+    This one just returns a list of the outputs for the embeddings search. 
+    Since the question asked by the user might refer to previous anwser
+    """
     inputs = history['inputs']
     outputs = history['outputs']
     size = len(inputs) - 1
@@ -391,13 +345,60 @@ def _get_history_embeddings(history: dict) -> List[str]:
 
     return history_list
 
-"""
-Check if the history map has 0 outputs and outputs
-"""
 def _has_history(history: dict) -> bool:
+    """
+    Check if the history map has 0 outputs and outputs
+    """
     if len(history['inputs']) > 0 and len(history['outputs']) > 0:
         return True
     return False
+
+def _generate_response(query: str, prompt: str, temp: float, tokens: int, history: List[Dict[str, str]], past_msg_incl: int) -> Union[Dict, tuple]:
+
+    '''minimal validation'''
+    if not isinstance(history, list):
+        return jsonify({"error":"history must be a list of dictionaries"}), 400
+    if not query:
+        return jsonify({"error":"Request body must contain a query"}), 400
+    if not prompt and not history:
+        return jsonify({"error":"Request body must contain at least a prompt or an history"}), 400
+    if past_msg_incl > 20:
+        past_msg_incl = 20
+
+    # if we have an history (and no prompt) ... use it, else reset history so to speak to force new prompt
+    # kiss principle here and the goal is to mimick what they do on the Azure OpenAI playground right now for simplicy
+    if history and not prompt:
+        history.append({"role":"user", "content":query})
+        # truncate history if needed (and keep the first item in the list since it contains the prompt set)
+        if len(history) > past_msg_incl:
+            history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
+    else:
+       history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages = history, # type: ignore
+        temperature=temp,
+        max_tokens=tokens,
+        top_p=0.95,
+        frequency_penalty=0,
+        presence_penalty=0,
+        stop=None)
+
+    content = response.choices[0].message.content
+    role = response.choices[0].message.role
+    logging.info(f"[QUERY] {query} [ANSWER] {content} (role: {role})")
+
+    r = {'message': [], 'created': '', 'history': [], 'id': '', 'model': '', 'object': '', 'usage': {'completion_tokens': int, 'prompt_tokens': int, 'total_tokens': int}}
+
+    r['id'] = response.id
+    r['message'] = {"role": role,"content": content}
+    history.append(r['message'])
+    r['history'] = history
+    r['created'] = response.created
+    if response.usage is not None:
+        r['usage'] = {'completion_tokens': response.usage.completion_tokens, 'prompt_tokens': response.usage.prompt_tokens, 'total_tokens': response.usage.total_tokens}
+    return r
 
 # bootstrap
 _bootstrapIndex()
