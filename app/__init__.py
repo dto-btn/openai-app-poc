@@ -42,7 +42,7 @@ key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
 
 models = {
-    "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
+    "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {}, "service_context": ServiceContext },
 }
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
@@ -77,7 +77,8 @@ def _bootstrapIndex():
     for model in models.values():
         start = time.time()
         print("Loading up the index: {}... (with model: {})".format(_default_index_name, model))
-        set_global_service_context(_get_service_context(model["name"], model["context_window"]))
+        model["service_context"] = _get_service_context(model["name"], model["context_window"])
+        set_global_service_context(model["service_context"])
         # indices are pre-loaded with the same model they will be queried with
         model["index"] = _get_index(index_name=_default_index_name)
         end = time.time()
@@ -121,6 +122,8 @@ def query():
     response_mode = ResponseMode.TREE_SUMMARIZE
     model_data = {}
     num_output = 800
+
+    print(body)
 
     if "query" not in body:
         return jsonify({"error":"Request body must contain a query."}), 400
@@ -178,12 +181,7 @@ def query():
             print("unable to load model, will use default", ex)
             return jsonify({"error": str(ex)}), 500
 
-    start = time.time()
-    service_context = _get_service_context(model_data["name"], model_data["context_window"], temperature, num_output)
-    #set_global_service_context(service_context) # remove?
-    end = time.time()
-    print("Service context set (took {} seconds). model={}, context_window={}, num_output={}".format(end-start, model_data["name"], model_data["context_window"], num_output))
-
+    service_context = model_data["service_context"]
     query_bundle = query
 
     #prompt building, and query bundle
@@ -200,20 +198,21 @@ def query():
     retriever = VectorIndexRetriever(index=model_data["index"], similarity_top_k=k) # type: ignore
 
     # configure response synthesizer
-    response_synthesizer = get_response_synthesizer(response_mode=response_mode, service_context=service_context)
+    response_synthesizer = get_response_synthesizer(response_mode=response_mode, 
+                                                    service_context=service_context,
+                                                    text_qa_template=text_qa_template,
+                                                    summary_template=text_qa_template,
+                                                    simple_template=text_qa_template,
+                                                    refine_template=text_qa_template,
+                                                    )
 
     # assemble query engine
     query_engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         service_context=service_context,
-        text_qa_template=text_qa_template,
-        refine_template=get_refined_prompt(lang),
         verbose=True
     )
-
-    prompts_dict = query_engine.get_prompts()
-    print(prompts_dict)
 
     response = query_engine.query(query_bundle)
     metadata = _response_metadata(response, pretty)
@@ -400,7 +399,6 @@ def _generate_response(query: str, prompt: str, temp: float, tokens: int, histor
     history.append(r['message'])
     r['history'] = history
     r['created'] = response.created
-    r['model'] = response.model
     if response.usage is not None:
         r['usage'] = {'completion_tokens': response.usage.completion_tokens, 'prompt_tokens': response.usage.prompt_tokens, 'total_tokens': response.usage.total_tokens}
     return r
