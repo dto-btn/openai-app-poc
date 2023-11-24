@@ -47,7 +47,7 @@ key_vault_name          = os.environ["KEY_VAULT_NAME"]
 openai_endpoint_name    = os.environ["OPENAI_ENDPOINT_NAME"]
 
 models = {
-    "gpt-4": {"name": "gpt-4", "context_window": 8192, "index": {} },
+    "gpt-4": {"name": "gpt-4", "deployment": os.getenv("GPT4_DEPLOYMENT", "gpt-4-1106"), "context_window": 8192, "index": {} },
 }
 
 kv_uri              = f"https://{key_vault_name}.vault.azure.net"
@@ -82,7 +82,7 @@ def _bootstrapIndex():
     for model in models.values():
         start = time.time()
         print("Loading up the index: {}... (with model: {})".format(_default_index_name, model))
-        set_global_service_context(_get_service_context(model["name"], model["context_window"]))
+        set_global_service_context(_get_service_context(model["name"], model["deployment"] , model["context_window"]))
         # indices are pre-loaded with the same model they will be queried with
         model["index"] = _get_index(index_name=_default_index_name)
         end = time.time()
@@ -181,7 +181,7 @@ def query():
             print("unable to load model, will use default", ex)
             return jsonify({"error": str(ex)}), 500
 
-    service_context = _get_service_context(model=model_data["name"], context_window=model_data["context_window"], temperature=temperature, num_output=num_output)
+    service_context = _get_service_context(model=model_data["name"], deployment=model_data["deployment"], context_window=model_data["context_window"], temperature=temperature, num_output=num_output)
     query_bundle = query
 
     #prompt building, and query bundle
@@ -243,9 +243,9 @@ def _get_index(index_name: str, storage_location: str = DEFAULT_PERSIST_DIR):
     #return VectorStoreIndex.from_vector_store(vector_store=vector_store)
     return load_index_from_storage(storage_context)
 
-def _get_service_context(model: str, context_window: int, num_output: int = 800, temperature: float = 0.7,) -> "ServiceContext":
+def _get_service_context(model: str, deployment: str, context_window: int, num_output: int = 800, temperature: float = 0.7,) -> "ServiceContext":
     # using same dep as model name because of an older bug in langchains lib (now fixed I believe)
-    llm = _get_llm(model, temperature)
+    llm = _get_llm(model, deployment, temperature)
 
     llm_predictor = _get_llm_predictor(llm)
 
@@ -261,8 +261,8 @@ def _get_service_context(model: str, context_window: int, num_output: int = 800,
 
     return ServiceContext.from_defaults(llm_predictor=llm_predictor, embed_model=embedding_llm, callback_manager=callback_manager, prompt_helper=prompt_helper)
 
-def _get_llm(model: str, temperature: float = 0.7):
-    return AzureChatOpenAI(model=model,
+def _get_llm(model: str, deployment: str, temperature: float = 0.7):
+    return AzureChatOpenAI(model=model, azure_deployment=deployment,
                            temperature=temperature,api_key=api_key, api_version=api_version, azure_endpoint=azure_openai_uri)
 
 def _get_llm_predictor(llm) -> LLMPredictor:
@@ -373,6 +373,7 @@ def _generate_response(query: str, prompt: str, temp: float, tokens: int, histor
         if len(history) > past_msg_incl:
             history = [history[0]] + (history[-(past_msg_incl-1):] if past_msg_incl > 1 else []) #else if 1 we end up with -0 wich is interpreted as 0: (whole list)
     else:
+       logging.info(f"PROMPT: {prompt}")
        history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
 
     response = client.chat.completions.create(
