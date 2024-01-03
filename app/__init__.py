@@ -377,7 +377,7 @@ def _generate_response(query: str, prompt: str, temp: float, tokens: int, histor
        history = [{"role":"system","content":prompt}, {"role":"user","content":query}]
 
     response = client.chat.completions.create(
-        model="gpt-4",
+        model=os.getenv("GPT4_DEPLOYMENT", "gpt-4-1106"),
         messages = history, # type: ignore
         temperature=temp,
         max_tokens=tokens,

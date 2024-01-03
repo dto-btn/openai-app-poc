@@ -11,7 +11,7 @@ pip install -r requirements.txt --upgrade
 
 Might need to run `Ctrl+Shift+P` in VSCode, type `Python: Create environment...` and follow instructions if needed.
 
-To run the application simply do `flask --debug --app app run`
+To run the application simply do `flask --debug --app app run --port=5001`
 
 ### sending a query
 
